@@ -3,12 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- 项目名称：改这里和下面 login 里的 <h1> 即可 -->
+<!-- 项目名称：改这里和下面 login 里的 <h1> 即可。
+     每次更新 style.css / app.js 后，把下面三处 ?v= 的数字加 1，浏览器就不会用旧的缓存文件。 -->
 <title>手记</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
 <div class="app">
@@ -102,8 +103,8 @@
 <div class="overlay lightbox" id="lightbox" hidden><img alt="照片大图"></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="config.js"></script>
+<script src="config.js?v=4"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9"></script>
-<script src="app.js"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
