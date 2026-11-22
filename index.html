@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>纸页日记</title>
+<!-- 项目名称：改这里和下面 login 里的 <h1> 即可 -->
+<title>手记</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
@@ -11,37 +12,62 @@
 </head>
 <body>
 <div class="app">
-  <aside class="side" aria-label="目录">
-    <div class="search">
-      <label for="search" class="sr-only">搜索日记</label>
-      <input id="search" type="search" placeholder="搜索文字或标签" autocomplete="off">
-      <kbd>⌘K</kbd>
-    </div>
-
-    <nav aria-labelledby="lbl-views">
-      <p class="nav-label" id="lbl-views">浏览</p>
-      <ul class="nav" id="views"></ul>
+  <!-- 电脑：左侧栏。手机：侧栏隐藏，各部分会被搬进顶部按钮打开的面板里 -->
+  <aside class="side" id="side" aria-label="目录">
+    <nav class="sections" aria-label="板块">
+      <button type="button" data-section="journal" aria-current="true">手记</button>
+      <button type="button" data-section="days" aria-current="false">纪念日</button>
     </nav>
 
-    <nav aria-labelledby="lbl-nb">
+    <section class="sec" id="sec-cal" aria-label="日历"><div id="mini-cal"></div></section>
+
+    <section class="sec" id="sec-search">
+      <div class="search">
+        <label for="search" class="sr-only">搜索日记</label>
+        <input id="search" type="search" placeholder="搜索文字或标签" autocomplete="off">
+        <kbd>⌘K</kbd>
+      </div>
+    </section>
+
+    <section class="sec" id="sec-views" aria-labelledby="lbl-views">
+      <p class="nav-label" id="lbl-views">视图</p>
+      <ul class="nav" id="views"></ul>
+    </section>
+
+    <section class="sec" id="sec-nb" aria-labelledby="lbl-nb">
       <p class="nav-label"><span id="lbl-nb">日记本</span><span class="acts"><button type="button" id="add-notebook">新建</button><button type="button" id="toggle-nb-edit">编辑</button></span></p>
       <ul class="nav" id="notebook-list"></ul>
-    </nav>
+    </section>
 
-    <nav aria-labelledby="lbl-tags">
+    <section class="sec" id="sec-tags" aria-labelledby="lbl-tags">
       <p class="nav-label"><span id="lbl-tags">标签</span><button type="button" id="toggle-tag-edit">编辑</button></p>
       <ul class="nav" id="tag-list"></ul>
-    </nav>
+    </section>
 
-    <div class="stats" id="stats" aria-label="写作统计"></div>
+    <section class="sec" id="sec-stats">
+      <button type="button" class="stats" id="stats-summary" aria-label="打开统计"></button>
+    </section>
 
-    <div class="side-foot">
+    <section class="sec side-foot" id="sec-backup">
+      <p class="nav-label mobile-only">备份</p>
       <button type="button" class="link-btn" id="export-btn">导出备份</button>
       <button type="button" class="link-btn" id="import-btn">导入备份</button>
       <input type="file" id="import-file" accept="application/json,.json" hidden>
       <p class="account"><span id="account-email"></span><button type="button" class="link-btn" id="signout-btn">退出登录</button></p>
-    </div>
+    </section>
   </aside>
+
+  <!-- 手机顶部栏 -->
+  <header class="mbar" id="mbar">
+    <button type="button" data-mpanel="views" aria-expanded="false">视图</button>
+    <button type="button" data-mpanel="nb" aria-expanded="false">日记本</button>
+    <button type="button" data-mpanel="tags" aria-expanded="false">标签</button>
+    <button type="button" data-mpanel="search" aria-expanded="false">搜索</button>
+    <button type="button" data-page="stats">统计</button>
+    <button type="button" data-mpanel="backup" aria-expanded="false">备份</button>
+  </header>
+  <div class="mpanel" id="mpanel" hidden></div>
+  <div class="mscrim" id="mscrim" hidden></div>
 
   <main class="main" id="main">
     <div class="main-inner">
@@ -53,11 +79,13 @@
       <div id="timeline"></div>
     </div>
   </main>
+
+  <button type="button" class="fab" id="fab" aria-label="写一篇日记">写</button>
 </div>
 
 <div class="login" id="login" hidden>
   <form class="login-sheet" id="login-form" novalidate>
-    <h1>纸页日记</h1>
+    <h1>手记</h1>
     <p class="muted">登录后才能看到你的日记。</p>
     <label for="login-email">邮箱</label>
     <input id="login-email" type="email" autocomplete="username" required>
