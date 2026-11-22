@@ -105,6 +105,8 @@
 
 <script src="config.js?v=4"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9"></script>
+<!-- 本地预览：网址后面加 ?mock 就用假数据，不连 Supabase（见 dev/mock.js） -->
+<script>if (/[?&]mock\b/.test(location.search)) document.write('<script src="dev/mock.js"><\/script>');</script>
 <script src="app.js?v=4"></script>
 </body>
 </html>
