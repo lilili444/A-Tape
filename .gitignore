@@ -1,0 +1,7 @@
+# 这个仓库是公开的：日记备份、导出文件、照片都不要提交
+*备份*.json
+*backup*.json
+*导入*.json
+*.heic
+*.HEIC
+.DS_Store

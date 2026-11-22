@@ -36,6 +36,11 @@ MyJournal/
 ├── config.js            Supabase 的网址和 Publishable key（可以公开）
 ├── supabase/
 │   └── schema.sql       建表、权限规则、照片和录音的存储空间（可以重复运行）
+├── dev/
+│   └── mock.js          本地预览用的假数据（网址加 ?mock 时才会用到）
+├── docs/
+│   └── 开发记录.md       为什么这样做：选型、版本历史、踩过的坑
+├── CLAUDE.md            给 Claude Code 的项目说明（规则、数据格式、待办）
 └── README.md            就是这份说明
 ```
 
@@ -76,6 +81,7 @@ MyJournal/
 ## 日常使用
 
 - **更新代码**：在 GitHub 网页上打开文件 → 铅笔图标编辑；或者 **Add file → Upload files** 上传新版本覆盖 → Commit。1～3 分钟后网站自动更新。
+- **改了 `style.css` 或 `app.js` 之后**：把 `index.html` 里三处 `?v=4` 的数字加 1（比如都改成 `?v=5`）一起上传。GitHub Pages 会让浏览器缓存文件 10 分钟，不改版本号的话，浏览器可能拿新的页面配旧的样式或程序，页面就会乱掉。如果已经乱了，按 `⌘⇧R` 强制刷新。
 - **导入以前的日记**：点“导入备份”，选 `.json` 文件。同一篇日记不会重复。
 - **Supabase 暂停**：免费项目一周没有任何访问会被暂停。数据不会丢，在后台点 **Resume project** 就能恢复。
 
@@ -87,6 +93,11 @@ MyJournal/
 - 苹果手记的导出文件里没有 Journal 信息，所以标签需要手动加。
 - 照片统一压缩到长边 1600px；录音作为附件导入；视频没有导入；音乐、心情、运动记录写成了日记末尾的“【手记附件】”文字说明。
 - 每篇导入的日记有 `source: "apple-journal"` 和原文件名 `sourceFile`，以后需要时可以对回原始导出。
+
+### 用 Claude Code 继续开发
+
+- 仓库里的 `CLAUDE.md` 是给 Claude 的交接说明，Claude Code 每次开始工作都会先读它。项目规则或待办变了，记得让 Claude 顺手更新。
+- **本地预览**：让 Claude Code 在仓库文件夹里启动本地服务器，打开 `http://localhost:8000/?mock`。用的是假日记，不用登录，也碰不到你的真实数据，适合试改样式。
 
 ---
 
