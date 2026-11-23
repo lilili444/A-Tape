@@ -2,7 +2,7 @@
    手记 · 程序逻辑
    ------------------------------------------------------------
    存储层 Store：唯一和 Supabase 打交道的地方。
-     records 表 → 日记 / 标签 / 日记本（每条一行，内容是 JSON）
+     records 表 → 日记 / 标签 / 日记本 / 纪念日 / 设置（每条一行，内容是 JSON）
      photos 桶  → 照片，路径 “用户ID/照片ID.jpg”
      media 桶   → 录音，路径 “用户ID/文件ID”
    以后换存储，只改这一块。
@@ -84,7 +84,7 @@ const todayKey = () => dayKey(new Date());
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 // 版本号：和 index.html 里三处 ?v= 保持一致。规则见 docs/开发记录.md
-const APP_VERSION = '0.5.3';
+const APP_VERSION = '0.6.0';
 const VIEWS = [
   { id: 'timeline', label: '时间线' },
   { id: 'y3', label: '三年日记', years: 3, name: '三年' },
@@ -158,7 +158,7 @@ function writePref(key, value) {
 /* ---------- 状态 ---------- */
 const state = {
   entries: [], tags: [], notebooks: [],
-  section: 'journal',          // journal | days（纪念日，筹备中）
+  section: 'journal',          // journal | days（纪念日 · 倒数日）
   page: 'journal',             // journal | stats
   view: 'timeline',            // timeline | y3 | y5
   notebook: null, tagSel: [], query: '',   // tagSel：选中的标签（可以多选，要同时有这些标签）
@@ -172,6 +172,15 @@ const state = {
   editTags: false, editNotebooks: false, addingNotebook: false,
   mpanel: null,
   urls: new Map(),
+  // 纪念日板块
+  days: [], life: { key: 'life', birth: '', lifespan: 88 },
+  dview: 'today',              // today | list | life
+  dgroup: '',                  // 倒数里只看某个分类
+  dsel: null,                  // 选中的日子（电脑上显示在右边）
+  dopen: false,                // 手机上是否打开了详情页
+  dAllMarks: false,            // 时间节点显示全部
+  lifeAge: null,               // 人生页看的是哪一岁
+  dEditing: null,              // 正在编辑的日子 / 出生日期
 };
 const tagById = id => state.tags.find(t => t.id === id);
 const tagName = id => (tagById(id) || {}).name || '';
@@ -318,6 +327,11 @@ function renderSide() {
     b.setAttribute('aria-expanded', String(!shut));
     b.title = shut ? '展开' : '收起';
   });
+
+  const nDays = allDays().length;
+  $('#dview-list').innerHTML = DVIEWS.map(v =>
+    `<li><button type="button" data-dview="${v.id}" aria-current="${state.section === 'days' && state.dview === v.id}"><span>${v.label}</span>${v.id === 'list' ? `<span class="n">${nDays}</span>` : ''}</button></li>`).join('');
+  document.querySelectorAll('#dbar [data-dview]').forEach(b => b.setAttribute('aria-current', String(state.dview === b.dataset.dview)));
 
   $('#views').innerHTML = VIEWS.map(v =>
     `<li><button type="button" data-view="${v.id}" aria-current="${state.page === 'journal' && state.view === v.id}"><span>${v.label}</span></button></li>`).join('');
@@ -573,20 +587,497 @@ function renderStatsPage() {
     </section>`;
 }
 
+/* ============================================================
+   纪念日 · 倒数日
+   ------------------------------------------------------------
+   数据：records 表 store = 'anniversaries'，每条一个“日子”：
+     { id, title, date: 'YYYY-MM-DD', emoji, group, repeat: 'none' | 'yearly', life, note, createdAt, updatedAt }
+     group：分类（文字，比如“英国”）；repeat：每年重复（生日、周年）；life：放进“人生足迹”
+   出生日期和预计寿命存在 meta：{ key: 'life', birth: 'YYYY-MM-DD', lifespan: 88 }，生日会自动出现在倒数里。
+   天数按“日”算，当天算 0：9月28日 → 11月23日 = 56 天。
+   三个页面：今日 / 倒数（电脑上左边列表、右边详情）/ 人生
+   ============================================================ */
+const DVIEWS = [{ id: 'today', label: '今日' }, { id: 'list', label: '倒数' }, { id: 'life', label: '人生' }];
+const DAY_MARKS = [30, 50, 100, 200, 300, 500, 1000, 1500, 2000, 3000, 5000, 10000];
+const EMOJI_PICKS = ['🎂', '❤️', '🎓', '✈️', '🏠', '📚', '🎵', '🧗', '💼', '🌱', '⭐', '🎉'];
+const BDAY_ID = '__birthday';
+const WEEK_FULL = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+const dayDiff = (a, b) => Math.round((keyToUTC(b) - keyToUTC(a)) / 86400000);   // b 比 a 晚几天
+const wkOf = k => WEEK[new Date(keyToUTC(k)).getUTCDay()];
+const fmtMD = k => { const [, m, d] = k.split('-').map(Number); return `${m}月${d}日 ${wkOf(k)}`; };
+const fmtFull = k => `${shortDate(k)} ${wkOf(k)}`;
+const fmtSmart = k => k.slice(0, 4) === todayKey().slice(0, 4) ? fmtMD(k) : fmtFull(k);
+const fmtN = n => n.toLocaleString('zh-CN');
+// 某年没有这一天（2月29日）就用这个月最后一天
+const clampDay = (y, m, d) => `${y}-${pad(m)}-${pad(Math.min(d, new Date(Date.UTC(y, m, 0)).getUTCDate()))}`;
+const yearsLater = (k, n) => { const [y, m, d] = k.split('-').map(Number); return clampDay(y + n, m, d); };
+function nextYearly(k, from) {
+  let n = Math.max(0, Number(from.slice(0, 4)) - Number(k.slice(0, 4)));
+  while (yearsLater(k, n) < from) n++;
+  return { date: yearsLater(k, n), n };
+}
+// “3 个月 15 天”
+function spanText(from, to) {
+  const [y1, m1, d1] = from.split('-').map(Number), [y2, m2, d2] = to.split('-').map(Number);
+  let y = y2 - y1, m = m2 - m1, d = d2 - d1;
+  if (d < 0) { m--; d += new Date(Date.UTC(y2, m2 - 1, 0)).getUTCDate(); }
+  if (m < 0) { y--; m += 12; }
+  return [y && `${y} 年`, m && `${m} 个月`, d && `${d} 天`].filter(Boolean).join(' ') || '0 天';
+}
+const firstGrapheme = s => {
+  if (!s) return '';
+  try { return [...new Intl.Segmenter('zh', { granularity: 'grapheme' }).segment(s)][0].segment; } catch (e) { return [...s][0]; }
+};
+
+function birthdayItem() {
+  return state.life.birth ? { id: BDAY_ID, title: '生日', emoji: '🎂', date: state.life.birth, repeat: 'yearly', group: '', life: false, note: '', birthday: true } : null;
+}
+const allDays = () => { const b = birthdayItem(); return b ? [b, ...state.days] : [...state.days]; };
+const annById = id => allDays().find(a => a.id === id);
+const dayGroups = () => [...new Set(state.days.map(a => a.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+
+// 一个日子现在的状态：since 已经 N 天 / until 还有 N 天 / next 每年重复的，离下一次还有 N 天
+function dayInfo(a, today = todayKey()) {
+  const since = dayDiff(a.date, today);
+  if (a.repeat === 'yearly' && since > 0) {
+    const nx = nextYearly(a.date, today);
+    return { mode: 'next', target: nx.date, days: dayDiff(today, nx.date), since, nth: nx.n };
+  }
+  if (since >= 0) return { mode: 'since', target: a.date, days: since, since };
+  return { mode: 'until', target: a.date, days: -since, since };
+}
+const nthLabel = (a, n) => a.birthday ? `${n} 岁生日` : `${n} 周年`;
+function annSub(a, i) {
+  if (i.mode === 'since') return `已经 · 自 ${fmtSmart(a.date)}`;
+  if (i.mode === 'next') return `还有 · ${fmtSmart(i.target)} · ${nthLabel(a, i.nth)}`;
+  return `还有 · ${fmtSmart(i.target)}`;
+}
+const numHTML = i => i.days === 0 ? '<span class="big-num">今天</span>' : `<span class="big-num">${fmtN(i.days)}</span><small>天</small>`;
+
+// 时间节点：30 / 50 / 100 天……和每一个周年
+function marksOf(a, today) {
+  const out = DAY_MARKS.map(n => ({ label: `${n} 天纪念`, date: addDays(a.date, n) }));
+  for (let y = 1; y <= 120; y++) out.push({ label: a.birthday ? `${y} 岁` : `${y} 周年`, date: yearsLater(a.date, y) });
+  out.sort((x, y) => x.date.localeCompare(y.date));
+  return { past: out.filter(m => m.date <= today), future: out.filter(m => m.date > today) };
+}
+// 列表里那一排小格子：离下一个节点走了多少
+function annProgress(a, i, today) {
+  if (i.mode === 'since') {
+    const m = marksOf(a, today);
+    const prev = m.past.length ? m.past[m.past.length - 1].date : a.date, nx = m.future[0];
+    return nx ? dayDiff(prev, today) / Math.max(1, dayDiff(prev, nx.date)) : 1;
+  }
+  if (i.mode === 'next') { const last = yearsLater(a.date, i.nth - 1); return dayDiff(last, today) / Math.max(1, dayDiff(last, i.target)); }
+  const from = (a.createdAt || '').slice(0, 10) || today;
+  return from >= a.date ? 0 : Math.max(0, dayDiff(from, today)) / dayDiff(from, a.date);
+}
+const dotsHTML = (frac, n) => {
+  const on = Math.round(Math.min(1, Math.max(0, frac)) * n);
+  return `<span class="dots" aria-hidden="true">${Array.from({ length: n }, (_, k) => k < on ? '<i class="on"></i>' : '<i></i>').join('')}</span>`;
+};
+
+// 年龄（带小数）：每过一个生日加 1
+function ageAt(birth, k) {
+  const [by, bm, bd] = birth.split('-').map(Number);
+  let y = Number(k.slice(0, 4)) - by;
+  if (clampDay(by + y, bm, bd) > k) y--;
+  const start = clampDay(by + y, bm, bd), end = clampDay(by + y + 1, bm, bd);
+  return y + dayDiff(start, k) / dayDiff(start, end);
+}
+
+/* ----- 倒数：列表 + 详情 ----- */
+function annRowHTML({ a, i }, today, sel) {
+  return `<button type="button" class="ann" data-ann="${a.id}" aria-current="${a.id === sel}">
+    <span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>
+    <span class="ann-main"><span class="ann-title">${esc(a.title)}</span><span class="ann-sub">${esc(annSub(a, i))}</span></span>
+    <span class="ann-num">${numHTML(i)}</span>
+    ${dotsHTML(annProgress(a, i, today), 30)}
+  </button>`;
+}
+// 一格一格的时间：格子太多时自动换成每格一周 / 一个月 / 一年
+const UNITS = [[1, '一天'], [7, '一周'], [30.4375, '一个月'], [365.25, '一年']];
+function gridHTML(a, i, today) {
+  const COLS = 14, MAX = 140;
+  const span = Math.max(1, i.days);       // 格子数和天数一致：已经 107 天 = 107 格，最后一格是今天
+  const [size, unit] = UNITS.find(u => Math.ceil(span / u[0]) <= MAX) || UNITS[3];
+  const n = Math.ceil(span / size);
+  let cells = '', cap;
+  if (i.mode === 'since') {
+    const total = Math.ceil(n / COLS) * COLS + COLS;     // 多留一排空格：接下来的日子
+    for (let k = 0; k < total; k++) {
+      if (k >= n) { cells += '<i></i>'; continue; }
+      const op = n > 1 ? (0.35 + 0.65 * k / (n - 1)).toFixed(2) : 1;
+      cells += `<i class="on${k === n - 1 ? ' now' : ''}" style="opacity:${op}"></i>`;
+    }
+    cap = [`${shortDate(a.date)}`, '今天', `每格${unit} · 已走 ${fmtN(n)} 格`];
+  } else {
+    const total = Math.ceil(n / COLS) * COLS;
+    for (let k = 0; k < total; k++) cells += k >= n ? '<i class="pad"></i>' : `<i class="${k === 0 ? 'now' : k === n - 1 ? 'goal' : ''}"></i>`;
+    cap = ['今天', shortDate(i.target), `每格${unit} · 还有 ${fmtN(n)} 格`];
+  }
+  return `<div class="d-grid" aria-hidden="true">${cells}</div>
+    <div class="d-cap"><span>${cap[0]}</span><span>${cap[1]}</span></div><p class="d-cap-note">${cap[2]}</p>`;
+}
+function marksHTML(a, today) {
+  const m = marksOf(a, today);
+  if (!m.past.length && !m.future.length) return '';
+  const past = state.dAllMarks ? m.past : m.past.slice(-2);
+  const future = m.future.slice(0, state.dAllMarks ? 8 : 3);
+  const row = (k, cls, sub) => `<li class="mark ${cls}"><span class="mk-dot" aria-hidden="true"></span><span><b>${esc(k.label)}</b><span class="ann-sub">${fmtSmart(k.date)} · ${sub}</span></span></li>`;
+  return `<section class="marks">
+    <div class="td-row"><p class="d-label">时间节点</p>${m.past.length > 2 ? `<button type="button" class="text-btn" id="toggle-marks">${state.dAllMarks ? '收起' : '显示全部'}</button>` : ''}</div>
+    <ol>${past.map(k => row(k, 'done', '已达成')).join('')}${future.map((k, j) => row(k, j === 0 ? 'next' : '', `${fmtN(dayDiff(today, k.date))} 天后`)).join('')}</ol>
+  </section>`;
+}
+function annDetailHTML(a) {
+  const today = todayKey(), i = dayInfo(a, today);
+  const lines = [];
+  if (i.mode === 'since') {
+    const nx = marksOf(a, today).future[0];
+    if (nx) lines.push(`再 ${fmtN(dayDiff(today, nx.date))} 天，就满 ${nx.label.replace('纪念', '')}了`);
+    if (i.days >= 31) lines.push(`也就是 ${spanText(a.date, today)}`);
+    lines.push(`${fmtFull(a.date)} 起`);
+  } else if (i.mode === 'next') {
+    lines.push(`${fmtFull(i.target)} · ${nthLabel(a, i.nth)}`);
+    lines.push(`从 ${fmtFull(a.date)} 起，已经 ${fmtN(i.since)} 天`);
+  } else {
+    lines.push(fmtFull(a.date));
+    if (i.days >= 31) lines.push(`也就是 ${spanText(today, a.date)}以后`);
+  }
+  const tags = [a.group && '#' + a.group, a.life && '人生足迹', a.repeat === 'yearly' && '每年重复'].filter(Boolean);
+  return `<article class="d-detail" aria-label="${esc(a.title)}">
+    ${isPhone() ? '<button type="button" class="back-link" id="ann-back">← 返回</button>' : ''}
+    ${gridHTML(a, i, today)}
+    <div class="d-head"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span><h3>${esc(a.title)}</h3>
+      <button type="button" class="text-btn" id="ann-edit">${a.birthday ? '改出生日期' : '编辑'}</button></div>
+    ${tags.length ? `<p class="d-meta">${esc(tags.join(' · '))}</p>` : ''}
+    <div class="d-big"><span class="pre">${i.days === 0 ? '' : i.mode === 'since' ? '已经' : '还有'}</span>${numHTML(i)}</div>
+    <div class="d-lines">${lines.map(l => `<p>${esc(l)}</p>`).join('')}</div>
+    ${a.note ? `<p class="d-note">${esc(a.note)}</p>` : ''}
+    ${i.mode !== 'until' ? marksHTML(a, today) : ''}
+  </article>`;
+}
+function renderDList() {
+  const today = todayKey();
+  const groups = dayGroups();
+  if (state.dgroup && !groups.includes(state.dgroup)) state.dgroup = '';
+  const list = allDays().filter(a => !state.dgroup || a.group === state.dgroup).map(a => ({ a, i: dayInfo(a, today) }));
+  const coming = list.filter(x => x.i.mode !== 'since').sort((x, y) => x.i.days - y.i.days);
+  const gone = list.filter(x => x.i.mode === 'since').sort((x, y) => y.a.date.localeCompare(x.a.date));
+  setTitle(state.dgroup || '倒数', `${list.length} 个日子`);
+  if (!list.some(x => x.a.id === state.dsel)) state.dsel = ((coming[0] || gone[0] || {}).a || {}).id || null;
+  const phone = isPhone();
+  const sel = annById(state.dsel);
+  if (phone && state.dopen && sel) { $('#timeline').innerHTML = annDetailHTML(sel); return; }
+  state.dopen = false;
+  const chips = groups.length ? `<div class="chips" role="group" aria-label="分类">
+    <button type="button" data-dgroup="" aria-pressed="${!state.dgroup}">全部</button>
+    ${groups.map(g => `<button type="button" data-dgroup="${esc(g)}" aria-pressed="${state.dgroup === g}">${esc(g)}</button>`).join('')}</div>` : '';
+  const selId = phone ? null : state.dsel;
+  let rows = '';
+  if (coming.length) rows += `<div class="month"><h3>还有</h3></div>` + coming.map(x => annRowHTML(x, today, selId)).join('');
+  if (gone.length) rows += `<div class="month"><h3>已经</h3></div>` + gone.map(x => annRowHTML(x, today, selId)).join('');
+  if (!list.length) rows = `<div class="empty"><p>${state.days.length ? '这个分类里还没有日子。' : '还没有记下任何日子。'}</p><button type="button" class="btn" id="ann-new">记一个日子</button></div>`;
+  const listHTML = `<div class="d-list">${chips}${rows}</div>`;
+  $('#timeline').innerHTML = phone ? listHTML : `<div class="d-split">${listHTML}${sel ? annDetailHTML(sel) : ''}</div>`;
+}
+
+/* ----- 今日 ----- */
+function smallRowHTML({ a, i }) {
+  const n = i.days === 0 ? '今天' : `${i.mode === 'since' ? '已' : '还有'} <b>${fmtN(i.days)}</b> 天`;
+  const sub = i.mode === 'since' ? `自 ${fmtSmart(a.date)}` : fmtSmart(i.target);
+  return `<button type="button" class="td-item" data-goann="${a.id}">
+    <span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>
+    <span class="ann-main"><span class="td-title">${esc(a.title)}</span><span class="ann-sub">${esc(sub)}</span></span>
+    <span class="td-n">${n}</span></button>`;
+}
+function renderDToday() {
+  const today = todayKey(), now = new Date();
+  const items = allDays().map(a => ({ a, i: dayInfo(a, today) }));
+  const coming = items.filter(x => x.i.mode !== 'since').sort((x, y) => x.i.days - y.i.days);
+  const recent = items.filter(x => x.i.mode === 'since').sort((x, y) => y.a.date.localeCompare(x.a.date));
+  const y = now.getFullYear();
+  const frac = (now - new Date(y, 0, 1)) / (new Date(y + 1, 0, 1) - new Date(y, 0, 1));
+  const [, m, d] = today.split('-').map(Number);
+  const next = coming[0];
+  const own = items.filter(x => !x.a.birthday);
+  const sumDays = own.reduce((s, x) => s + Math.max(0, x.i.since), 0);
+  const longest = own.filter(x => x.i.since > 0).sort((p, q) => q.i.since - p.i.since)[0];
+  const thisYear = state.days.filter(a => a.date.startsWith(String(y))).length;
+  setTitle('今日', '');
+  $('#timeline').innerHTML = `<div class="today">
+    <div class="td-col">
+      <section class="td-top">
+        ${next ? `<p class="td-hint">离 ${esc(next.a.title)} ${next.i.days ? `还有 ${fmtN(next.i.days)} 天` : '就是今天'}</p>` : ''}
+        <div class="td-date"><span class="big-num">${m}月${d}日</span><span class="td-wk">${WEEK_FULL[now.getDay()]}</span></div>
+      </section>
+      <section>
+        <div class="td-row"><p class="d-label">今年已过</p><span class="td-pct">${(frac * 100).toFixed(1)}%</span></div>
+        <span title="每格一周">${dotsHTML(frac, 52)}</span>
+      </section>
+      <section>
+        <p class="d-label">下一个值得期待的日子</p>
+        ${next ? `<button type="button" class="td-next" data-goann="${next.a.id}">
+            <span class="ann-main"><span class="td-title"><span class="ann-emoji" aria-hidden="true">${esc(next.a.emoji)}</span>${esc(next.a.title)}</span>
+            <span class="ann-sub">${esc(annSub(next.a, next.i))}</span></span>
+            <span class="ann-num">${numHTML(next.i)}</span></button>
+            ${coming.slice(1, 4).map(smallRowHTML).join('')}`
+          : `<p class="muted">还没有要倒数的日子。</p>`}
+      </section>
+    </div>
+    <div class="td-col">
+      <section>
+        <p class="d-label">记着的日子</p>
+        ${recent.length ? recent.slice(0, 5).map(smallRowHTML).join('') : `<p class="muted">还没有记下的日子。<button type="button" class="slot-write" id="ann-new">记一个</button></p>`}
+      </section>
+      <section class="ledger">
+        <p class="d-label">时间账本</p>
+        <p class="ledger-lead">记下的日子加起来，已经走过</p>
+        <p class="ledger-big"><span class="big-num">${fmtN(sumDays)}</span><small>天</small></p>
+        <div class="ledger-row">
+          <div><span class="big-num">${thisYear}</span><span class="ann-sub">今年记下的日子</span></div>
+          <div><span class="big-num">${state.days.length}</span><span class="ann-sub">一共记着</span></div>
+        </div>
+        ${longest ? `<p class="ledger-note">最久的陪伴：「${esc(longest.a.title)}」已经 ${fmtN(longest.i.since)} 天</p>` : ''}
+      </section>
+    </div>
+  </div>`;
+}
+
+/* ----- 人生：一条蛇形的线，每一小段是一年 ----- */
+function lifeSVG(birth, span, age, sel, events) {
+  const PER = 10, rows = Math.ceil(span / PER), W = 640, PX = 48, L = W - PX * 2, R = 34, TOP = 40;
+  const rowY = i => TOP + i * R * 2;
+  const pos = g => {
+    const i = Math.min(rows - 1, Math.max(0, Math.floor(g / PER)));
+    const t = (g - i * PER) / PER;
+    return [i % 2 ? PX + L - t * L : PX + t * L, rowY(i)];
+  };
+  const f = n => n.toFixed(1);
+  let s = '';
+  for (let i = 0; i < rows - 1; i++) {     // 转弯
+    const right = i % 2 === 0, x = right ? PX + L : PX;
+    s += `<path class="lp-turn${age >= (i + 1) * PER ? ' past' : ''}" d="M${x} ${rowY(i)} A${R} ${R} 0 0 ${right ? 1 : 0} ${x} ${rowY(i + 1)}"/>`;
+  }
+  for (let a = 0; a < span; a++) {         // 每一年一小段
+    const [x1, y] = pos(a + 0.14), [x2] = pos(a + 0.86);
+    let seg = `<line class="lp-seg${a + 1 <= age ? ' past' : ''}" x1="${f(x1)}" y1="${y}" x2="${f(x2)}" y2="${y}"/>`;
+    if (a < age && a + 1 > age && age > a + 0.14) { const [xn] = pos(Math.min(age, a + 0.86)); seg += `<line class="lp-seg past" x1="${f(x1)}" y1="${y}" x2="${f(xn)}" y2="${y}"/>`; }
+    s += `<g class="lp-year${a === sel ? ' sel' : ''}" data-lifeage="${a}"><title>${a} 岁这一年</title><line class="lp-hit" x1="${f(x1)}" y1="${y}" x2="${f(x2)}" y2="${y}"/>${seg}</g>`;
+  }
+  const label = (g, text, dy = 26) => {
+    const [x, y] = pos(g);
+    const anchor = x <= PX + 1 ? 'start' : x >= PX + L - 1 ? 'end' : 'middle';
+    return `<text class="lp-label" x="${f(x)}" y="${y + dy}" text-anchor="${anchor}">${text}</text>`;
+  };
+  s += label(0, `出生 ${birth.slice(0, 4)}`);
+  for (let i = 1; i < rows; i++) if (i * PER < span) s += label(i * PER, i * PER);
+  s += label(span, `${span} 岁`);
+  for (const e of events) {
+    const g = ageAt(birth, e.date);
+    if (g < 0 || g > span) continue;
+    const [x, y] = pos(g);
+    s += e.emoji ? `<text class="lp-ev" x="${f(x)}" y="${y - 13}" text-anchor="middle"><title>${esc(e.title)}</title>${esc(e.emoji)}</text>`
+      : `<circle class="lp-evdot" cx="${f(x)}" cy="${y - 15}" r="3.5"><title>${esc(e.title)}</title></circle>`;
+  }
+  const [nx, ny] = pos(age);
+  s += `<circle class="lp-now" cx="${f(nx)}" cy="${ny}" r="7"><title>现在</title></circle>`;
+  return `<svg viewBox="0 0 ${W} ${rowY(rows - 1) + 44}" role="img" aria-label="从出生到 ${span} 岁，每一小段是一年，墨点是现在">${s}</svg>`;
+}
+function renderDLife() {
+  setTitle('人生', '');
+  const L = state.life;
+  if (!L.birth) {
+    $('#timeline').innerHTML = `<div class="empty"><p>“人生”页面按出生日期来画：从出生到老，每一小段是一年。</p><button type="button" class="btn" id="life-settings">填写出生日期</button></div>`;
+    return;
+  }
+  const today = todayKey(), span = L.lifespan || 88;
+  const age = ageAt(L.birth, today);
+  const cur = Math.floor(age);
+  const sel = Math.min(span - 1, Math.max(0, state.lifeAge ?? cur));
+  const evs = state.days.filter(a => a.life).sort((x, y) => y.date.localeCompare(x.date));
+  const inYear = evs.filter(a => a.date >= L.birth && Math.floor(ageAt(L.birth, a.date)) === sel).reverse();
+  const nextBday = nextYearly(L.birth, addDays(today, 1));
+  const yStart = yearsLater(L.birth, sel), yEnd = addDays(yearsLater(L.birth, sel + 1), -1);
+  const ago = a => { const n = dayDiff(a.date, today); return n > 0 ? `${fmtN(n)} 天前` : n === 0 ? '今天' : `还有 ${fmtN(-n)} 天`; };
+  let fps = '', year = '';
+  for (const a of evs) {
+    if (a.date.slice(0, 4) !== year) { year = a.date.slice(0, 4); fps += `<li class="fp-year">${year}</li>`; }
+    const ageTxt = a.date >= L.birth ? ` · ${Math.floor(ageAt(L.birth, a.date))} 岁` : '';
+    fps += `<li><button type="button" class="fp" data-goann="${a.id}"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>
+      <span class="ann-main"><span class="td-title">${esc(a.title)}</span><span class="ann-sub">${shortDate(a.date)}${ageTxt} · ${ago(a)}</span></span></button></li>`;
+  }
+  $('#timeline').innerHTML = `<div class="life">
+    <div class="life-col">
+      <div class="life-head">
+        <div><p class="life-big">人生第 <span class="big-num">${cur + 1}</span> 年</p>
+          <p class="ann-sub">已走过 ${fmtN(dayDiff(L.birth, today))} 天 · 约是 ${span} 年的 ${(age / span * 100).toFixed(1)}%</p></div>
+        <button type="button" class="text-btn" id="life-settings">设置</button>
+      </div>
+      <div class="life-path">${lifeSVG(L.birth, span, age, sel, evs)}</div>
+      <p class="muted">墨点是现在 · 点一段，看那一年</p>
+      <section class="life-year">
+        <div class="td-row"><h3>${sel} 岁这一年</h3><span class="life-nav">
+          <button type="button" class="text-btn" data-lifeage="${sel - 1}" ${sel <= 0 ? 'disabled' : ''} aria-label="前一年">‹</button>
+          ${sel !== cur ? `<button type="button" class="text-btn" data-lifeage="${cur}">回到今年</button>` : ''}
+          <button type="button" class="text-btn" data-lifeage="${sel + 1}" ${sel >= span - 1 ? 'disabled' : ''} aria-label="后一年">›</button></span></div>
+        <p class="ann-sub">${shortDate(yStart)} – ${shortDate(yEnd)}${sel === cur ? ' · 就是现在' : ''}</p>
+        ${inYear.length ? `<ul class="fp-list">${inYear.map(a => `<li><button type="button" class="fp" data-goann="${a.id}"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span><span class="ann-main"><span class="td-title">${esc(a.title)}</span><span class="ann-sub">${fmtSmart(a.date)}</span></span></button></li>`).join('')}</ul>`
+          : `<p class="muted">这一年还没有记下人生足迹。</p>`}
+      </section>
+      <section class="life-next"><p class="d-label">下一站</p><p>再过 ${fmtN(dayDiff(today, nextBday.date))} 天，迎来 ${nextBday.n} 岁生日</p></section>
+    </div>
+    <div class="life-col">
+      <div class="td-row"><p class="d-label">人生足迹</p><button type="button" class="text-btn" id="ann-new" data-life="1">＋ 添加</button></div>
+      ${evs.length ? `<ol class="fp-list fp-line">${fps}</ol>` : `<p class="muted">新建日子时勾选“放进人生足迹”，重要的事就会出现在这里，也会标在上面那条线上。</p>`}
+    </div>
+  </div>`;
+}
+
 function renderDays() {
   $('#banner-slot').innerHTML = '';
-  setTitle('纪念日 · 倒数日', '');
-  $('#timeline').innerHTML = `<div class="empty"><p>这个板块还在筹备中。<br>数据会和手记放在同一个项目里。</p><button type="button" class="btn ghost" data-section="journal">回到手记</button></div>`;
+  if (state.dview === 'today') return renderDToday();
+  if (state.dview === 'life') return renderDLife();
+  return renderDList();
+}
+function goAnn(id) {
+  const a = annById(id);
+  if (!a) return;
+  state.section = 'days'; state.dview = 'list'; state.dsel = id; state.dopen = isPhone();
+  if (state.dgroup && a.group !== state.dgroup) state.dgroup = '';
+  state.dAllMarks = false;
+  closeMPanel(); render(); scrollTop();
+}
+
+/* ----- 新建 / 编辑一个日子（浮在上面的小纸） ----- */
+function newAnn(extra = {}) {
+  return {
+    id: uid(), title: '', date: todayKey(), emoji: '', group: state.dview === 'list' ? state.dgroup : '',
+    repeat: 'none', life: state.dview === 'life', note: '', createdAt: new Date().toISOString(), updatedAt: null, ...extra,
+  };
+}
+function openAnnEditor(a, isNew) {
+  if (a.birthday) return openLifeSettings();
+  closeMPanel();
+  state.dEditing = { kind: 'ann', a: { ...a }, isNew };
+  $('#editor').innerHTML = `<div class="dialog ann-form" role="dialog" aria-modal="true" aria-label="${isNew ? '记一个日子' : '编辑日子'}">
+    <div class="af-top">
+      <label class="sr-only" for="af-emoji">图标（一个 emoji）</label>
+      <input id="af-emoji" class="af-emoji" value="${esc(a.emoji)}" placeholder="☺" autocomplete="off">
+      <label class="sr-only" for="af-title">名称</label>
+      <input id="af-title" class="af-title" value="${esc(a.title)}" placeholder="名称，比如：第一次上课" autocomplete="off">
+    </div>
+    <div class="af-picks" role="group" aria-label="常用图标">${EMOJI_PICKS.map(e => `<button type="button" data-pick="${e}">${e}</button>`).join('')}</div>
+    <label class="dialog-label" for="af-date">日期</label>
+    <input type="date" id="af-date" class="dialog-input" value="${esc(a.date)}">
+    <label class="dialog-label" for="af-group">分类（可以不填）</label>
+    <input id="af-group" class="dialog-input" list="af-groups" value="${esc(a.group)}" placeholder="比如：英国、攀岩、DDL" autocomplete="off">
+    <datalist id="af-groups">${dayGroups().map(g => `<option value="${esc(g)}">`).join('')}</datalist>
+    <label class="af-check"><input type="checkbox" id="af-repeat" ${a.repeat === 'yearly' ? 'checked' : ''}> 每年重复（生日、周年纪念）</label>
+    <label class="af-check"><input type="checkbox" id="af-life" ${a.life ? 'checked' : ''}> 放进“人生足迹”（重要的人生事件）</label>
+    <label class="dialog-label" for="af-note">备注（可以不写）</label>
+    <textarea id="af-note" class="dialog-input af-note" rows="2">${esc(a.note)}</textarea>
+    <div class="row">${isNew ? '' : '<button type="button" class="text-btn danger" id="af-del">删除</button>'}<span class="grow"></span>
+      <button type="button" class="btn ghost" id="af-cancel">取消</button><button type="button" class="btn" id="af-save" title="⌘↵">保存</button></div>
+  </div>`;
+  $('#editor').hidden = false;
+  $('#af-title').focus();
+}
+function readAnnForm() {
+  return {
+    ...state.dEditing.a,
+    emoji: firstGrapheme($('#af-emoji').value.trim()),
+    title: $('#af-title').value.trim(),
+    date: $('#af-date').value,
+    group: $('#af-group').value.trim().replace(/^#/, ''),
+    repeat: $('#af-repeat').checked ? 'yearly' : 'none',
+    life: $('#af-life').checked,
+    note: $('#af-note').value.trim(),
+  };
+}
+function annDirty() {
+  const ed = state.dEditing;
+  if (!ed || ed.kind !== 'ann') return false;
+  const now = readAnnForm();
+  return ['emoji', 'title', 'date', 'group', 'repeat', 'life', 'note'].some(k => now[k] !== ed.a[k]);
+}
+function closeAnnEditor() { state.dEditing = null; $('#editor').hidden = true; $('#editor').innerHTML = ''; }
+async function cancelAnnEditor() {
+  if (annDirty() && !await askConfirm('放弃这次修改？', '放弃')) return;
+  closeAnnEditor();
+}
+async function saveAnn() {
+  const ed = state.dEditing;
+  if (!ed) return;
+  const a = readAnnForm();
+  if (!a.title) { toast('写一个名称吧'); $('#af-title').focus(); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(a.date)) { toast('请选一个日期'); $('#af-date').focus(); return; }
+  a.updatedAt = new Date().toISOString();
+  $('#af-save').disabled = true;
+  try { await Store.put('anniversaries', a); }
+  catch (err) {
+    $('#af-save').disabled = false;
+    toast('没能保存，可能是网络断了。内容还在，联网后再点“保存”。', 6000);
+    return;
+  }
+  const i = state.days.findIndex(x => x.id === a.id);
+  if (i >= 0) state.days[i] = a; else state.days.push(a);
+  closeAnnEditor();
+  if (state.dview === 'list') { state.dsel = a.id; if (state.dgroup && a.group !== state.dgroup) state.dgroup = ''; }
+  render();
+  toast(ed.isNew ? '已保存' : '已更新');
+}
+async function deleteAnn() {
+  const a = state.dEditing.a;
+  if (!await askConfirm(`删除“${a.title}”？删除后无法恢复。`, '删除')) return;
+  try { await Store.del('anniversaries', a.id); } catch (err) { toast('没能删除，可能是网络断了，请稍后再试。', 5000); return; }
+  state.days = state.days.filter(x => x.id !== a.id);
+  if (state.dsel === a.id) { state.dsel = null; state.dopen = false; }
+  closeAnnEditor();
+  render();
+  toast('已删除');
+}
+function openLifeSettings() {
+  closeMPanel();
+  state.dEditing = { kind: 'life' };
+  $('#editor').innerHTML = `<div class="dialog ann-form" role="dialog" aria-modal="true" aria-labelledby="lf-h">
+    <p id="lf-h">“人生”页面按出生日期来画，生日也会自动出现在倒数里。</p>
+    <label class="dialog-label" for="lf-birth">出生日期</label>
+    <input type="date" id="lf-birth" class="dialog-input" value="${esc(state.life.birth)}">
+    <label class="dialog-label" for="lf-span">这条线画到多少岁</label>
+    <input type="number" id="lf-span" class="dialog-input" min="30" max="120" inputmode="numeric" value="${state.life.lifespan || 88}">
+    <div class="row"><span class="grow"></span><button type="button" class="btn ghost" id="af-cancel">取消</button><button type="button" class="btn" id="lf-save">保存</button></div>
+  </div>`;
+  $('#editor').hidden = false;
+  $('#lf-birth').focus();
+}
+async function saveLife() {
+  const birth = $('#lf-birth').value, span = Math.round(Number($('#lf-span').value) || 88);
+  if (birth && birth > todayKey()) { toast('出生日期不能晚于今天'); return; }
+  if (span < 30 || span > 120) { toast('请填 30 到 120 之间的数字'); return; }
+  const life = { key: 'life', birth, lifespan: span };
+  try { await Store.put('meta', life); } catch (err) { toast('没能保存，可能是网络断了。', 5000); return; }
+  state.life = life;
+  state.lifeAge = null;
+  closeAnnEditor();
+  render();
+  toast('已保存');
 }
 
 function renderMain() {
   const journal = state.section === 'journal';
   const reading = journal && state.page === 'journal' && !!state.reading;
-  $('#new-btn').hidden = !journal || reading;
-  $('#fab').hidden = !journal || reading;
+  $('#new-btn').hidden = journal && reading;
+  $('#new-btn').textContent = journal ? '写一篇' : '记一个日子';
+  $('#fab').hidden = journal ? reading : state.dopen;
+  $('#fab').textContent = journal ? '写' : '＋';
+  $('#fab').setAttribute('aria-label', journal ? '写一篇日记' : '记一个日子');
   $('#rd-back').hidden = !reading;
   $('#rd-edit').hidden = !reading;
   $('#mbar').hidden = !journal;
+  $('#dbar').hidden = journal;
+  $('#main').classList.toggle('wide', !journal);
   if (!journal) return renderDays();
   if (state.page === 'stats') return renderStatsPage();
   if (reading) return renderReader();
@@ -1065,8 +1556,9 @@ async function exportData() {
     try { media.push({ id: audios[i].id, mime: audios[i].mime, data: await Store.mediaData(audios[i].id) }); } catch (err) { failed++; }
   }
   const data = {
-    app: 'paper-journal', version: 3, exportedAt: new Date().toISOString(),
+    app: 'paper-journal', version: 4, exportedAt: new Date().toISOString(),
     notebooks: state.notebooks, entries: state.entries, tags: state.tags, photos, media,
+    anniversaries: state.days, meta: state.life.birth ? [state.life] : [],
   };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1076,13 +1568,14 @@ async function exportData() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-  toast(`已导出 ${state.entries.length} 篇日记、${photos.length} 张照片、${media.length} 段录音${failed ? `；有 ${failed} 个文件没能打包` : ''}`, 5000);
+  toast(`已导出 ${state.entries.length} 篇日记、${state.days.length} 个纪念日、${photos.length} 张照片、${media.length} 段录音${failed ? `；有 ${failed} 个文件没能打包` : ''}`, 5000);
 }
 async function importData(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch (e) { toast('这个文件不是有效的备份文件', 4000); return; }
   if (!data || data.app !== 'paper-journal' || !Array.isArray(data.entries)) { toast('这个文件不是手记的备份', 4000); return; }
-  const ok = await askConfirm(`备份里有 ${data.entries.length} 篇日记。导入后会和现有日记合并，同一篇日记会被备份里的版本覆盖。`, '导入', false);
+  const anns = Array.isArray(data.anniversaries) ? data.anniversaries : [];
+  const ok = await askConfirm(`备份里有 ${data.entries.length} 篇日记${anns.length ? `、${anns.length} 个纪念日` : ''}。导入后会和现有内容合并，同一篇会被备份里的版本覆盖。`, '导入', false);
   if (!ok) return;
   const photos = data.photos || [], media = data.media || [];
   let failed = 0;
@@ -1105,6 +1598,8 @@ async function importData(file) {
     await Store.putMany('notebooks', incoming);
     await Store.putMany('tags', data.tags || []);
     await Store.putMany('entries', data.entries);
+    await Store.putMany('anniversaries', anns);
+    if (Array.isArray(data.meta)) await Store.putMany('meta', data.meta.filter(m => m && m.key));
   } catch (err) {
     toast('导入中途失败了：' + (err.message || '网络问题') + '。可以再导入一次，已经导入的不会重复。', 8000);
     await loadAll(); render();
@@ -1113,7 +1608,7 @@ async function importData(file) {
   state.urls.clear();
   await loadAll();
   render();
-  toast(`已导入 ${data.entries.length} 篇日记${failed ? `，有 ${failed} 个文件没传上去` : ''}`, 5000);
+  toast(`已导入 ${data.entries.length} 篇日记${anns.length ? `、${anns.length} 个纪念日` : ''}${failed ? `，有 ${failed} 个文件没传上去` : ''}`, 5000);
 }
 
 /* ---------- 读取 ---------- */
@@ -1137,6 +1632,10 @@ async function loadAll() {
   try { await syncTags(); } catch (err) { console.warn('标签整理失败，下次打开会再试', err); }
   state.tagSel = state.tagSel.filter(id => tagById(id));
   if (state.notebook && !nbById(state.notebook)) state.notebook = null;
+  // 纪念日：旧数据缺的字段补上默认值
+  state.days = (await Store.all('anniversaries')).map(raw => ({ emoji: '', group: '', repeat: 'none', life: false, note: '', ...raw }));
+  const life = (await Store.all('meta')).find(m => m.key === 'life');
+  state.life = { key: 'life', birth: '', lifespan: 88, ...(life || {}) };
 }
 
 /* v0.5 起，标签以正文里的 #标签 为准。每次打开时检查一遍，只有需要时才写入：
@@ -1176,8 +1675,8 @@ async function syncTags() {
 /* ---------- 手机：顶部按钮打开的面板 ----------
    面板里显示的就是侧栏里的同一块内容（搬过去，关掉时再搬回来），
    所以电脑和手机共用一套功能代码。 */
-const MPANELS = { views: ['sec-cal', 'sec-views'], nb: ['sec-nb'], tags: ['sec-tags'], search: ['sec-search'], backup: ['sec-backup'] };
-const SIDE_ORDER = ['sec-cal', 'sec-search', 'sec-views', 'sec-nb', 'sec-tags', 'sec-stats', 'sec-backup'];
+const MPANELS = { views: ['sec-sections', 'sec-cal', 'sec-views'], nb: ['sec-nb'], tags: ['sec-tags'], search: ['sec-search'], backup: ['sec-backup'] };
+const SIDE_ORDER = ['sec-sections', 'sec-dviews', 'sec-cal', 'sec-search', 'sec-views', 'sec-nb', 'sec-tags', 'sec-stats', 'sec-backup'];
 function restoreSide() { const side = $('#side'); SIDE_ORDER.forEach(id => side.appendChild(document.getElementById(id))); }
 function openMPanel(name) {
   if (state.mpanel === name) { closeMPanel(); return; }
@@ -1198,7 +1697,10 @@ function closeMPanel() {
   state.mpanel = null;
   document.querySelectorAll('[data-mpanel]').forEach(b => b.setAttribute('aria-expanded', 'false'));
 }
-window.matchMedia('(min-width: 761px)').addEventListener('change', closeMPanel);
+window.matchMedia('(min-width: 761px)').addEventListener('change', () => {
+  closeMPanel();
+  if (state.section === 'days' && $('#loading').hidden) renderMain();   // 纪念日：电脑是左右两栏，手机是单独一页
+});
 
 /* ---------- 事件 ---------- */
 function goJournal() { state.page = 'journal'; state.section = 'journal'; state.reading = null; }
@@ -1207,17 +1709,42 @@ const scrollTop = () => { $('#main').scrollTop = 0; window.scrollTo(0, 0); };
 
 document.addEventListener('click', async ev => {
   if (ev.target.closest('a[href]')) return; // 链接照常打开，不打开编辑页
-  const t = ev.target.closest('button, .entry, img[data-zoom], #mscrim');
+  const t = ev.target.closest('button, .entry, img[data-zoom], #mscrim, [data-lifeage]');
   if (!t) return;
   if (t.id === 'mscrim') return closeMPanel();
   if (t.matches('img[data-zoom]')) return showLightbox(t.src);
+
+  // 纪念日：编辑小纸
+  if (state.dEditing) {
+    if (t.matches('[data-pick]')) { $('#af-emoji').value = t.dataset.pick; return; }
+    if (t.id === 'af-save') return saveAnn();
+    if (t.id === 'lf-save') return saveLife();
+    if (t.id === 'af-cancel') return cancelAnnEditor();
+    if (t.id === 'af-del') return deleteAnn();
+    return;
+  }
+  // 纪念日：页面
+  if (t.matches('[data-dview]')) { state.section = 'days'; state.dview = t.dataset.dview; state.dopen = false; state.lifeAge = null; closeMPanel(); render(); scrollTop(); return; }
+  if (t.matches('[data-dgroup]')) { state.dgroup = t.dataset.dgroup; state.dsel = null; renderMain(); return; }
+  if (t.matches('[data-ann]')) {
+    state.dsel = t.dataset.ann; state.dAllMarks = false;
+    if (isPhone()) { state.dopen = true; renderMain(); scrollTop(); } else renderMain();
+    return;
+  }
+  if (t.matches('[data-goann]')) return goAnn(t.dataset.goann);
+  if (t.id === 'ann-back') { state.dopen = false; renderMain(); return; }
+  if (t.id === 'ann-edit') { const a = annById(state.dsel); if (a) openAnnEditor(a, false); return; }
+  if (t.id === 'ann-new') return openAnnEditor(newAnn(t.dataset.life ? { life: true } : {}), true);
+  if (t.id === 'toggle-marks') { state.dAllMarks = !state.dAllMarks; renderMain(); return; }
+  if (t.id === 'life-settings') return openLifeSettings();
+  if (t.matches('[data-lifeage]')) { state.lifeAge = +t.dataset.lifeage; renderMain(); return; }
 
   // 阅读页
   if (t.id === 'rd-back') return closeReader();
   if (t.id === 'rd-edit') { const e = state.entries.find(x => x.id === state.reading); if (e) openEditor(e, false, true); return; }
 
   // 板块 / 页面 / 手机面板
-  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
+  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; state.reading = null; state.dopen = false; closeMPanel(); render(); scrollTop(); return; }
   if (t.matches('[data-mpanel]')) return openMPanel(t.dataset.mpanel);
   if (t.matches('[data-page]')) { state.page = t.dataset.page; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
   if (t.id === 'stats-summary') { state.page = 'stats'; state.reading = null; render(); scrollTop(); return; }
@@ -1272,6 +1799,7 @@ document.addEventListener('click', async ev => {
     closeMPanel();
     await quietly(() => Store.client.auth.signOut());
     state.entries = []; state.tags = []; state.notebooks = []; state.urls.clear();
+    state.days = []; state.life = { key: 'life', birth: '', lifespan: 88 };
     $('#timeline').innerHTML = '';
     showLogin();
     return;
@@ -1279,6 +1807,7 @@ document.addEventListener('click', async ev => {
 
   // 主区
   if (t.id === 'new-btn' || t.id === 'fab' || t.id === 'empty-new') {
+    if (state.section === 'days') return openAnnEditor(newAnn(), true);
     const inYears = state.page === 'journal' && state.view !== 'timeline' && state.anchor !== todayKey();
     const onDay = state.page === 'journal' && state.view === 'timeline' && state.day && state.day !== todayKey();
     return openEditor(newEntry(inYears ? state.anchor + 'T21:00' : onDay ? state.day + 'T21:00' : undefined), true);
@@ -1336,6 +1865,7 @@ $('#editor').addEventListener('mousedown', ev => {
   if (ev.target.closest('#ed-tagsug')) { ev.preventDefault(); return; }   // 点标签提示时不让正文失去焦点
   if (ev.target.id !== 'editor') return;
   if (state.editing) saveEditor();
+  else if (state.dEditing) cancelAnnEditor();
 });
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 
@@ -1385,6 +1915,11 @@ document.addEventListener('keydown', ev => {
     return;
   }
 
+  if (state.dEditing) {
+    if (ev.key === 'Escape') { ev.preventDefault(); cancelAnnEditor(); }
+    else if (mod && ev.key === 'Enter') { ev.preventDefault(); if (state.dEditing.kind === 'life') saveLife(); else saveAnn(); }
+    return;
+  }
   if (state.editing) {
     if (ev.key === 'Escape' && !$('#ed-link-form').hidden) { ev.preventDefault(); showLinkForm(false); return; }
     if (ev.key === 'Escape' || (mod && ev.key === 'Enter')) { ev.preventDefault(); saveEditor(); return; }
@@ -1400,7 +1935,11 @@ document.addEventListener('keydown', ev => {
     if (ev.key === 'Escape' && document.activeElement.id === 'search') { ev.target.value = ''; state.query = ''; render(); }
     return;
   }
-  if (state.section !== 'journal') return;
+  if (state.section !== 'journal') {
+    if (!mod && ev.key.toLowerCase() === 'n') { ev.preventDefault(); openAnnEditor(newAnn(), true); }
+    else if (ev.key === 'Escape' && state.dopen) { ev.preventDefault(); state.dopen = false; renderMain(); }
+    return;
+  }
   if (state.reading && state.page === 'journal') {
     if (ev.key === 'Escape') { ev.preventDefault(); closeReader(); }
     else if (!mod && ev.key.toLowerCase() === 'e') { ev.preventDefault(); $('#rd-edit').click(); }
