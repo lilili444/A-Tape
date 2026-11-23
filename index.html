@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=0.6.2">
+<link rel="stylesheet" href="style.css?v=0.7.0">
 </head>
 <body>
 <div class="app">
@@ -22,11 +22,12 @@
   <aside class="side" id="side" aria-label="目录">
     <nav class="sections" id="sec-sections" aria-label="板块">
       <button type="button" data-section="journal" aria-current="true">手记</button>
-      <button type="button" data-section="days" aria-current="false">纪念日</button>
+      <button type="button" data-section="days" aria-current="false">时间轴</button>
     </nav>
 
-    <!-- 纪念日板块的三个页面（只在纪念日板块显示） -->
-    <section class="sec" id="sec-dviews" aria-label="纪念日页面"><ul class="nav" id="dview-list"></ul></section>
+    <!-- 时间轴板块：页面列表 + emoji 日历（只在时间轴板块显示；手机上日历是单独一页） -->
+    <section class="sec" id="sec-dviews" aria-label="时间轴页面"><ul class="nav" id="dview-list"></ul></section>
+    <section class="sec" id="sec-dcal" aria-label="时间轴日历"><div id="days-cal"></div></section>
 
     <section class="sec" id="sec-cal" aria-label="日历"><div id="mini-cal"></div></section>
 
@@ -75,12 +76,13 @@
     <button type="button" data-page="stats">统计</button>
     <button type="button" data-mpanel="backup" aria-expanded="false">备份</button>
   </header>
-  <!-- 手机：纪念日板块的顶部栏 -->
+  <!-- 手机：时间轴板块的顶部栏 -->
   <header class="mbar dbar" id="dbar" hidden>
     <button type="button" data-section="journal">‹ 手记</button>
     <button type="button" data-dview="today">今日</button>
-    <button type="button" data-dview="list">倒数</button>
+    <button type="button" data-dview="list">时间轴</button>
     <button type="button" data-dview="life">人生</button>
+    <button type="button" data-dview="cal">日历</button>
   </header>
   <div class="mpanel" id="mpanel" hidden></div>
   <div class="mscrim" id="mscrim" hidden></div>
@@ -104,7 +106,7 @@
 <div class="login" id="login" hidden>
   <form class="login-sheet" id="login-form" novalidate>
     <h1>一卷磁带</h1>
-    <p class="muted">登录后才能看到你的手记和纪念日。</p>
+    <p class="muted">登录后才能看到你的手记和时间轴。</p>
     <label for="login-email">邮箱</label>
     <input id="login-email" type="email" autocomplete="username" required>
     <label for="login-password">密码</label>
@@ -120,10 +122,10 @@
 <div class="overlay lightbox" id="lightbox" hidden><img alt="照片大图"></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="config.js?v=0.6.2"></script>
+<script src="config.js?v=0.7.0"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9"></script>
 <!-- 本地预览：网址后面加 ?mock 就用假数据，不连 Supabase（见 dev/mock.js） -->
 <script>if (/[?&]mock\b/.test(location.search)) document.write('<script src="dev/mock.js"><\/script>');</script>
-<script src="app.js?v=0.6.2"></script>
+<script src="app.js?v=0.7.0"></script>
 </body>
 </html>

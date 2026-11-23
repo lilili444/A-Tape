@@ -50,18 +50,19 @@
   const dk = offset => day(offset).slice(0, 10);
   db.meta.set('life', { key: 'life', birth: '2000-06-15', lifespan: 88 });
   [
-    ['🧗', '示例：第一次攀岩', 107, '爱好', { life: true }],
+    ['🧗', '示例：第一次攀岩', 107, '爱好', { life: true}],
     ['🎵', '示例：开始学钢琴', 56, '爱好'],
     ['🏠', '示例：搬进新家', 300, '生活', { life: true }],
-    ['🎓', '示例：毕业', 900, '', { life: true }],
+    ['🎓', '示例：毕业', 900, '', { life: true}],
     ['✈️', '示例：第一次出国', 1500, '', { life: true }],
     ['❤️', '示例：认识好朋友', 1100, '', { repeat: 'yearly' }],
-    ['💼', '示例：作品集截止', -18, 'DDL'],
+    ['💼', '示例：作品集截止', -18, 'DDL',],
     ['🎉', '示例：旅行出发', -45, '生活'],
     ['', '示例：没有图标的日子', 6, ''],
+    ['📚', '示例：读完一本书', 20, '爱好'],
   ].forEach(([emoji, title, offset, group, opt = {}], i) => {
     const id = 'mock-a' + i;
-    db.anniversaries.set(id, { id, title, emoji, date: dk(offset), group, repeat: 'none', life: false, note: '', createdAt: day(Math.max(offset, 30)).slice(0, 10) + 'T00:00:00Z', updatedAt: null, ...opt });
+    db.anniversaries.set(id, { id, title, emoji, date: dk(offset), group, repeat: 'none', countMode: 'next', life: false, note: '', createdAt: day(Math.max(offset, 30)).slice(0, 10) + 'T00:00:00Z', updatedAt: null, ...opt });
   });
 
   window.__TEST_STORE__ = {
