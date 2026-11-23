@@ -84,7 +84,7 @@ const todayKey = () => dayKey(new Date());
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 // 版本号：和 index.html 里三处 ?v= 保持一致。规则见 docs/开发记录.md
-const APP_VERSION = '0.5.2';
+const APP_VERSION = '0.5.3';
 const VIEWS = [
   { id: 'timeline', label: '时间线' },
   { id: 'y3', label: '三年日记', years: 3, name: '三年' },
@@ -408,6 +408,13 @@ function tagsHTML(e, withNb) {
   if (!e.tags.length && !nb) return '';
   return `<div class="meta">${nb}${e.tags.map(t => `<span class="tag">#${esc(tagName(t))}</span>`).join('')}</div>`;
 }
+// 列表预览：去掉正文最后“只有 #标签”的几行（这些标签已经显示在下面的浅灰标注里）。阅读页仍显示全文
+function previewText(e) {
+  const lines = e.body.trim().split('\n');
+  const tagOnly = new RegExp(`^\\s*(#${TAG_CHARS}+\\s*)+$`);
+  while (lines.length && (tagOnly.test(lines[lines.length - 1]) || !lines[lines.length - 1].trim())) lines.pop();
+  return lines.join('\n').trim();
+}
 function ariaLabel(e) {
   const d = new Date(e.date);
   return esc(`${e.title || e.body.slice(0, 20) || '没有文字的日记'}，${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`);
@@ -418,7 +425,7 @@ function entryHTML(e) {
     <div class="e-date"><span class="day">${d.getDate()}</span><span class="wk">${WEEK[d.getDay()]}</span><span class="tm">${pad(d.getHours())}:${pad(d.getMinutes())}</span></div>
     <div class="entry-body">
       ${e.title ? `<h4>${esc(e.title)}</h4>` : ''}
-      ${e.body.trim() ? `<p class="preview">${richText(e.body.trim())}</p>` : ''}
+      ${previewText(e) ? `<p class="preview">${richText(previewText(e))}</p>` : ''}
       ${thumbsHTML(e)}${attachHTML(e)}${tagsHTML(e, true)}
     </div>
   </article>`;
@@ -428,7 +435,7 @@ function yearEntryHTML(e) {
   return `<article class="entry yentry" data-id="${e.id}" tabindex="0" aria-label="${ariaLabel(e)}">
     <div class="y-time"><span>${pad(d.getHours())}:${pad(d.getMinutes())}</span></div>
     ${e.title ? `<h4>${esc(e.title)}</h4>` : ''}
-    ${e.body.trim() ? `<p class="preview">${richText(e.body.trim())}</p>` : ''}
+    ${previewText(e) ? `<p class="preview">${richText(previewText(e))}</p>` : ''}
     ${thumbsHTML(e)}${attachHTML(e)}${tagsHTML(e, true)}
   </article>`;
 }
