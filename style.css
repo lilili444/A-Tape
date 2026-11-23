@@ -102,11 +102,10 @@ button { cursor: pointer; }
 .edit-row input:focus { outline: none; border-bottom-color: var(--ink); }
 /* 标签：一行排好几个，可以多选 */
 .nav.cloud { flex-direction: row; flex-wrap: wrap; gap: 0 14px; }
-.nav.cloud button { width: auto; padding: 2px 0; font-size: 14px; gap: 0; font-style: italic; }
+.nav.cloud button { width: auto; padding: 2px 0; font-size: 14px; gap: 0; }
 .nav.cloud button .n { font-family: var(--font-body); font-size: 12px; }
 .nav.cloud button[aria-pressed="true"] { color: var(--accent); font-weight: 600; }
 .nav.cloud button[aria-pressed="true"] .n { color: var(--accent); }
-.nav.cloud .n { font-style: normal; }
 /* 标签编辑模式：样子不变，鼠标移上去变红并加下划线，点一下改名或删除 */
 .nav.cloud.editing button:hover, .nav.cloud.editing button:hover .n { color: var(--danger); text-decoration: underline; text-underline-offset: 3px; }
 .nav.cloud .hint { flex-basis: 100%; margin-top: 4px; }
@@ -188,8 +187,7 @@ button { cursor: pointer; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; filter: saturate(.92); }
 .thumb .more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(35,34,31,.45); color: #fff; font-family: var(--font-display); font-size: 22px; }
 .meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; font-size: 13px; color: var(--ink-soft); }
-.meta .tag { font-style: italic; }
-.htag { color: var(--accent); font-style: italic; }
+.htag { color: var(--accent); }
 
 /* 录音、链接（时间线里的简略显示） */
 .attach-line { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--ink-soft); }
@@ -315,7 +313,7 @@ button { cursor: pointer; }
 .tag-suggest[hidden] { display: none; }
 .tag-suggest .lab { font-size: 12px; color: var(--ink-soft); letter-spacing: .06em; }
 .tag-suggest .lab:last-child { margin-left: auto; }
-.tag-suggest button { border: 0; background: none; padding: 2px 0; color: var(--accent); font-style: italic; }
+.tag-suggest button { border: 0; background: none; padding: 2px 0; color: var(--accent); }
 .tag-suggest button:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 /* 阅读页（显示在右栏） */
