@@ -21,6 +21,7 @@
 | 文件 | 作用 |
 |---|---|
 | `index.html` | 页面骨架：电脑侧栏、手机顶部按钮栏、主区、登录页 |
+| `favicon-32.png` / `icon-180.png` | 网站图标（浏览器标签页 / 苹果主屏幕），`index.html` 里用相对路径引用 |
 | `style.css` | 全部视觉。颜色和字体用 `:root` 里的变量，手机样式在底部 `@media (max-width: 760px)` 里 |
 | `app.js` | 全部功能，没有构建步骤、没有框架，直接是浏览器 JS |
 | `config.js` | Supabase 网址 + Publishable key（可以公开） |
