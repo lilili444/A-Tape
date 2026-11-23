@@ -1,5 +1,5 @@
 /* ============================================================
-   磁带 · 程序逻辑（手记 + 纪念日）
+   一卷磁带 · 程序逻辑（手记 + 纪念日）
    ------------------------------------------------------------
    存储层 Store：唯一和 Supabase 打交道的地方。
      records 表 → 日记 / 标签 / 日记本 / 纪念日 / 设置（每条一行，内容是 JSON）
@@ -84,7 +84,7 @@ const todayKey = () => dayKey(new Date());
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 // 版本号：和 index.html 里三处 ?v= 保持一致。规则见 docs/开发记录.md
-const APP_VERSION = '0.6.1';
+const APP_VERSION = '0.6.2';
 const VIEWS = [
   { id: 'timeline', label: '时间线' },
   { id: 'y3', label: '三年日记', years: 3, name: '三年' },
@@ -1563,7 +1563,7 @@ async function exportData() {
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `磁带备份-${todayKey()}.json`;
+  a.download = `一卷磁带备份-${todayKey()}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1573,7 +1573,7 @@ async function exportData() {
 async function importData(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch (e) { toast('这个文件不是有效的备份文件', 4000); return; }
-  if (!data || data.app !== 'paper-journal' || !Array.isArray(data.entries)) { toast('这个文件不是磁带（手记）的备份', 4000); return; }
+  if (!data || data.app !== 'paper-journal' || !Array.isArray(data.entries)) { toast('这个文件不是一卷磁带（手记）的备份', 4000); return; }
   const anns = Array.isArray(data.anniversaries) ? data.anniversaries : [];
   const ok = await askConfirm(`备份里有 ${data.entries.length} 篇日记${anns.length ? `、${anns.length} 个纪念日` : ''}。导入后会和现有内容合并，同一篇会被备份里的版本覆盖。`, '导入', false);
   if (!ok) return;
