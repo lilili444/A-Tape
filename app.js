@@ -84,7 +84,7 @@ const todayKey = () => dayKey(new Date());
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 // 版本号：和 index.html 里三处 ?v= 保持一致。规则见 docs/开发记录.md
-const APP_VERSION = '0.5.1';
+const APP_VERSION = '0.5.2';
 const VIEWS = [
   { id: 'timeline', label: '时间线' },
   { id: 'y3', label: '三年日记', years: 3, name: '三年' },
@@ -402,10 +402,11 @@ function attachHTML(e) {
   if (e.links.length > 3) parts.push(`<span>另有 ${e.links.length - 3} 个链接</span>`);
   return `<div class="attach-line">${parts.join('')}</div>`;
 }
-// 日记下面的浅色标注：只显示所在日记本。标签已经写在正文里，不再重复显示
+// 日记下面的浅灰标注：第一个是所在日记本（只在“所有”里显示），后面是这篇的标签
 function tagsHTML(e, withNb) {
   const nb = withNb ? nbBadge(e) : '';
-  return nb ? `<div class="meta">${nb}</div>` : '';
+  if (!e.tags.length && !nb) return '';
+  return `<div class="meta">${nb}${e.tags.map(t => `<span class="tag">#${esc(tagName(t))}</span>`).join('')}</div>`;
 }
 function ariaLabel(e) {
   const d = new Date(e.date);
