@@ -83,8 +83,8 @@ const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate
 const todayKey = () => dayKey(new Date());
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
-const RIBBON = '<svg viewBox="0 0 12 16" aria-hidden="true"><path d="M1 0h10v16l-5-4-5 4z" fill="currentColor"/></svg>';
-const RIBBON_LINE = '<svg viewBox="0 0 12 16" aria-hidden="true"><path d="M1.5.5h9v14.2L6 11.2 1.5 14.7z" fill="none" stroke="currentColor"/></svg>';
+// 版本号：和 index.html 里三处 ?v= 保持一致。规则见 docs/开发记录.md
+const APP_VERSION = '0.5.0';
 const VIEWS = [
   { id: 'timeline', label: '时间线' },
   { id: 'y3', label: '三年日记', years: 3, name: '三年' },
@@ -114,24 +114,73 @@ function normalizeURL(input) {
 const domainOf = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } };
 const fmtSize = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
 
+/* ---------- #标签：直接写在正文里，保存时自动识别 ----------
+   标签名遇到空格、换行、# 或标点就结束（#生活 很开心 → “生活”）。
+   # 前面紧挨着英文字母、数字或 / & 时不算标签（比如网址里的 #、C#）；纯数字（#1）也不算。 */
+const TAG_STOP = '\\s#.,;:!?，。、；：！？…“”‘’"\'()（）【】\\[\\]{}<>《》「」『』/\\\\|';
+const TAG_CHARS = `[^${TAG_STOP}]`;
+const TAG_BEFORE = '(^|[^A-Za-z0-9_&#/])';
+const TAG_FIND = new RegExp(`${TAG_BEFORE}#(${TAG_CHARS}+)`, 'g');
+const escRE = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const isNumberTag = n => /^\d+$/.test(n);
+const validTagName = n => !!n && new RegExp(`^${TAG_CHARS}+$`).test(n) && !isNumberTag(n);
+// 正文里某一个标签（不分大小写），用来改名和删除
+const oneTagRE = name => new RegExp(`${TAG_BEFORE}#${escRE(name)}(?!${TAG_CHARS})`, 'gi');
+function tagsInText(text) {
+  const out = [], seen = new Set();
+  for (const m of (text || '').matchAll(TAG_FIND)) {
+    const key = m[2].toLowerCase();
+    if (isNumberTag(m[2]) || seen.has(key)) continue;
+    seen.add(key); out.push(m[2]);
+  }
+  return out;
+}
+// 显示正文：转义，并把 #标签 包起来上色
+function richText(text) {
+  let out = '', last = 0;
+  for (const m of (text || '').matchAll(TAG_FIND)) {
+    if (isNumberTag(m[2])) continue;
+    const start = m.index + m[1].length;
+    out += esc(text.slice(last, start)) + `<span class="htag">#${esc(m[2])}</span>`;
+    last = start + 1 + m[2].length;
+  }
+  return out + esc((text || '').slice(last));
+}
+
+/* 只存在这台设备浏览器里的小偏好（比如侧栏收起了哪几块）。读不到也没关系 */
+function readPref(key, fallback) {
+  try { const v = localStorage.getItem('journal:' + key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
+}
+function writePref(key, value) {
+  try { localStorage.setItem('journal:' + key, JSON.stringify(value)); } catch (e) { /* 无痕模式等情况下存不了，忽略 */ }
+}
+
 /* ---------- 状态 ---------- */
 const state = {
   entries: [], tags: [], notebooks: [],
   section: 'journal',          // journal | days（纪念日，筹备中）
   page: 'journal',             // journal | stats
   view: 'timeline',            // timeline | y3 | y5
-  notebook: null, tag: null, query: '',
+  notebook: null, tagSel: [], query: '',   // tagSel：选中的标签（可以多选，要同时有这些标签）
   day: null,                   // 时间线里只看某一天
   anchor: todayKey(),          // 三年/五年日记看的那一天
   calMonth: todayKey().slice(0, 7),
   statsYear: String(new Date().getFullYear()),
   editing: null,
+  reading: null,               // 正在阅读的日记 id
+  collapsed: new Set(readPref('collapsed', [])),   // 电脑侧栏收起的部分
   editTags: false, editNotebooks: false, addingNotebook: false,
   mpanel: null,
   urls: new Map(),
 };
 const tagById = id => state.tags.find(t => t.id === id);
 const tagName = id => (tagById(id) || {}).name || '';
+const tagByName = name => state.tags.find(t => t.name.toLowerCase() === name.toLowerCase());
+function tagCounts() {
+  const counts = new Map();
+  state.entries.forEach(e => e.tags.forEach(t => counts.set(t, (counts.get(t) || 0) + 1)));
+  return counts;
+}
 const nbById = id => state.notebooks.find(n => n.id === id);
 const sortedNotebooks = () => [...state.notebooks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || (a.createdAt || '').localeCompare(b.createdAt || ''));
 // 新日记默认放进“最近一篇日记所在的日记本”
@@ -183,7 +232,7 @@ function baseFiltered() {
   const q = state.query.trim().toLowerCase().replace(/^#/, '');
   return state.entries.filter(e => {
     if (state.notebook && e.notebookId !== state.notebook) return false;
-    if (state.tag && !e.tags.includes(state.tag)) return false;
+    if (state.tagSel.length && !state.tagSel.every(t => e.tags.includes(t))) return false;
     if (q) {
       const hay = (e.title + '\n' + e.body + '\n' + e.tags.map(tagName).join(' ') + '\n' + e.links.map(l => l.title + ' ' + l.url).join(' ')).toLowerCase();
       if (!hay.includes(q)) return false;
@@ -262,6 +311,14 @@ function renderSide() {
   document.querySelectorAll('[data-section]').forEach(b => b.setAttribute('aria-current', String(b.dataset.section === state.section)));
   renderCalendar();
 
+  // 电脑侧栏：点“视图 / 日记本 / 标签”收起或展开（手机面板里始终展开）
+  document.querySelectorAll('[data-collapse]').forEach(b => {
+    const shut = state.collapsed.has(b.dataset.collapse);
+    document.getElementById(b.dataset.collapse).classList.toggle('collapsed', shut);
+    b.setAttribute('aria-expanded', String(!shut));
+    b.title = shut ? '展开' : '收起';
+  });
+
   $('#views').innerHTML = VIEWS.map(v =>
     `<li><button type="button" data-view="${v.id}" aria-current="${state.page === 'journal' && state.view === v.id}"><span>${v.label}</span></button></li>`).join('');
 
@@ -276,30 +333,33 @@ function renderSide() {
       <input id="nb-name-${n.id}" data-nbrename="${n.id}" value="${esc(n.name)}">
       <button type="button" data-delnb="${n.id}" ${nbs.length < 2 ? 'disabled title="至少要保留一个日记本"' : ''} aria-label="删除日记本 ${esc(n.name)}">删除</button></li>`).join('');
   } else {
-    nbHTML = `<li><button type="button" data-nb="" aria-current="${!state.notebook}"><span>全部日记</span><span class="n">${state.entries.length}</span></button></li>`
+    nbHTML = `<li><button type="button" data-nb="" aria-current="${!state.notebook}"><span>所有</span><span class="n">${state.entries.length}</span></button></li>`
       + nbs.map(n => `<li><button type="button" data-nb="${n.id}" aria-current="${state.notebook === n.id}"><span>${esc(n.name)}</span><span class="n">${nbCount.get(n.id) || 0}</span></button></li>`).join('');
   }
   if (state.addingNotebook) nbHTML += `<li class="edit-row"><label class="sr-only" for="new-nb">新日记本名称</label><input id="new-nb" placeholder="新日记本名称，回车确定" autocomplete="off"></li>`;
   $('#notebook-list').innerHTML = nbHTML;
   $('#toggle-nb-edit').textContent = state.editNotebooks ? '完成' : '编辑';
 
-  // 标签
-  const counts = new Map();
-  state.entries.forEach(e => e.tags.forEach(t => counts.set(t, (counts.get(t) || 0) + 1)));
+  // 标签：平时一行排好几个“生活（10）”，可以多选；编辑时一行一个，方便改名、删除
+  const counts = tagCounts();
   const tags = [...state.tags].sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0) || a.name.localeCompare(b.name, 'zh'));
+  const shown = state.editTags ? tags : tags.filter(t => counts.get(t.id) || state.tagSel.includes(t.id));
   const list = $('#tag-list');
-  if (!tags.length) list.innerHTML = '<li><p class="muted">写日记时加上标签，就会出现在这里。</p></li>';
+  list.className = state.editTags ? 'nav cloud editing' : 'nav cloud';
+  if (!shown.length) list.innerHTML = '<li><p class="muted">在正文里写 #标签，就会出现在这里。</p></li>';
   else if (state.editTags) {
-    list.innerHTML = tags.map(t => `<li class="edit-row">
-      <label class="sr-only" for="tag-name-${t.id}">标签名称</label>
-      <input id="tag-name-${t.id}" data-rename="${t.id}" value="${esc(t.name)}">
-      <button type="button" data-deltag="${t.id}" aria-label="删除标签 ${esc(t.name)}">删除</button></li>`).join('');
+    // 编辑模式：样子不变，鼠标移上去变红；点一下才弹出“改名 / 删除”
+    list.innerHTML = shown.map(t => `<li><button type="button" data-tagedit="${t.id}" title="改名或删除">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`).join('')
+      + '<li class="hint"><p class="muted">点标签可以改名或删除。</p></li>';
   } else {
-    list.innerHTML = tags.map(t =>
-      `<li><button type="button" data-tag="${t.id}" aria-current="${state.tag === t.id}" title="${state.tag === t.id ? '再点一次取消筛选' : '只看这个标签'}"><span>#${esc(t.name)}</span><span class="n">${counts.get(t.id) || 0}</span></button></li>`).join('');
+    list.innerHTML = shown.map(t => {
+      const on = state.tagSel.includes(t.id);
+      return `<li><button type="button" data-tag="${t.id}" aria-pressed="${on}" title="${on ? '再点一次取消' : '只看有这个标签的日记（可以多选）'}">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`;
+    }).join('');
   }
   $('#toggle-tag-edit').textContent = state.editTags ? '完成' : '编辑';
   $('#toggle-tag-edit').hidden = !tags.length;
+  $('#clear-tags').hidden = !state.tagSel.length || state.editTags;
 
   // 统计摘要
   const s = computeStats();
@@ -317,15 +377,15 @@ function renderSide() {
 
 /* ---------- 渲染：主区 ---------- */
 function contextLabel() {
-  const parts = [state.notebook ? (nbById(state.notebook) || {}).name : '全部日记'];
-  if (state.tag) parts.push('#' + tagName(state.tag));
+  const parts = [state.notebook ? (nbById(state.notebook) || {}).name : '所有'];
+  if (state.tagSel.length) parts.push(state.tagSel.map(id => '#' + tagName(id)).join(' + '));
   if (state.query.trim()) parts.push(`搜索“${state.query.trim()}”`);
   return parts.join(' · ');
 }
 function nbBadge(e) {
   if (state.notebook || state.notebooks.length < 2) return '';
   const nb = nbById(e.notebookId);
-  return nb ? `<span class="nb">${esc(nb.name)}</span>` : '';
+  return nb ? `<span class="tag nb">#${esc(nb.name)}</span>` : '';
 }
 function thumbsHTML(e) {
   const photos = e.photos;
@@ -357,20 +417,18 @@ function entryHTML(e) {
     <div class="e-date"><span class="day">${d.getDate()}</span><span class="wk">${WEEK[d.getDay()]}</span><span class="tm">${pad(d.getHours())}:${pad(d.getMinutes())}</span></div>
     <div class="entry-body">
       ${e.title ? `<h4>${esc(e.title)}</h4>` : ''}
-      ${e.body.trim() ? `<p class="preview">${esc(e.body.trim())}</p>` : ''}
+      ${e.body.trim() ? `<p class="preview">${richText(e.body.trim())}</p>` : ''}
       ${thumbsHTML(e)}${attachHTML(e)}${tagsHTML(e, true)}
     </div>
-    ${e.bookmarked ? `<span class="ribbon" title="已收藏">${RIBBON}</span>` : ''}
   </article>`;
 }
 function yearEntryHTML(e) {
   const d = new Date(e.date);
   return `<article class="entry yentry" data-id="${e.id}" tabindex="0" aria-label="${ariaLabel(e)}">
-    <div class="y-time"><span>${pad(d.getHours())}:${pad(d.getMinutes())}</span>${nbBadge(e)}</div>
+    <div class="y-time"><span>${pad(d.getHours())}:${pad(d.getMinutes())}</span></div>
     ${e.title ? `<h4>${esc(e.title)}</h4>` : ''}
-    ${e.body.trim() ? `<p class="preview">${esc(e.body.trim())}</p>` : ''}
-    ${thumbsHTML(e)}${attachHTML(e)}${tagsHTML(e, false)}
-    ${e.bookmarked ? `<span class="ribbon" title="已收藏">${RIBBON}</span>` : ''}
+    ${e.body.trim() ? `<p class="preview">${richText(e.body.trim())}</p>` : ''}
+    ${thumbsHTML(e)}${attachHTML(e)}${tagsHTML(e, true)}
   </article>`;
 }
 const setTitle = (title, sub) => { $('#view-title').innerHTML = `${esc(title)}${sub ? `<span class="count">${esc(sub)}</span>` : ''}`; };
@@ -389,7 +447,7 @@ function renderTimeline(list) {
       tl.innerHTML = `<div class="empty"><p>这一天没有写日记。</p>${state.day <= todayKey() ? `<button type="button" class="btn ghost" data-write="${state.day}">在这一天写</button>` : ''}</div>`;
     } else {
       tl.innerHTML = state.entries.length
-        ? `<div class="empty"><p>没有符合条件的日记。</p><button type="button" class="btn ghost" id="clear-filters">查看全部日记</button></div>`
+        ? `<div class="empty"><p>没有符合条件的日记。</p><button type="button" class="btn ghost" id="clear-filters">查看所有日记</button></div>`
         : `<div class="empty"><p>还没有日记。</p><button type="button" class="btn" id="empty-new">写第一篇</button></div>`;
     }
     return;
@@ -515,11 +573,15 @@ function renderDays() {
 
 function renderMain() {
   const journal = state.section === 'journal';
-  $('#new-btn').hidden = !journal;
-  $('#fab').hidden = !journal;
+  const reading = journal && state.page === 'journal' && !!state.reading;
+  $('#new-btn').hidden = !journal || reading;
+  $('#fab').hidden = !journal || reading;
+  $('#rd-back').hidden = !reading;
+  $('#rd-edit').hidden = !reading;
   $('#mbar').hidden = !journal;
   if (!journal) return renderDays();
   if (state.page === 'stats') return renderStatsPage();
+  if (reading) return renderReader();
   $('#banner-slot').innerHTML = '';
   const list = filtered();
   const view = VIEWS.find(v => v.id === state.view);
@@ -527,20 +589,77 @@ function renderMain() {
 }
 function render() { renderSide(); renderMain(); }
 
+/* ---------- 阅读页：点日记先看全文，右上角“编辑”才进编辑页 ---------- */
+const fmtEdited = iso => new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+function audiosHTML(audios, removable) {
+  return audios.map(a => `<div class="audio-item">
+      <audio controls preload="none" data-media="${a.id}"></audio>
+      <span class="name" title="${esc(a.name)}">${esc(a.name || '录音')}${a.size ? ' · ' + fmtSize(a.size) : ''}</span>
+      ${removable ? `<button type="button" data-rmaudio="${a.id}" aria-label="移除录音 ${esc(a.name)}">移除</button>` : ''}</div>`).join('');
+}
+function linksHTML(links, removable) {
+  return links.map((l, i) => `<div class="link-card">
+      <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title || l.url)}</a>
+      <span class="dom">${esc(domainOf(l.url))}</span>
+      ${removable ? `<button type="button" data-rmlink="${i}" aria-label="移除链接">×</button>` : ''}</div>`).join('');
+}
+// 阅读页直接显示在右栏（主区）。“← 返回”回到列表，并回到原来看到的位置
+const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
+const mainScroll = () => isPhone() ? window.scrollY : $('#main').scrollTop;
+const setMainScroll = y => { $('#main').scrollTop = y; window.scrollTo(0, y); };
+function openReader(id) {
+  if (!state.entries.some(x => x.id === id)) return;
+  closeMPanel();
+  if (!state.reading) state.listScroll = mainScroll();
+  state.reading = id;
+  renderMain();
+  setMainScroll(0);
+  $('#rd-back').focus({ preventScroll: true });
+}
+function closeReader() {
+  const id = state.reading;
+  state.reading = null;
+  renderMain();
+  setMainScroll(state.listScroll || 0);
+  const card = id && document.querySelector(`.entry[data-id="${id}"]`);
+  if (card) card.focus({ preventScroll: true });
+}
+function renderReader() {
+  const e = state.entries.find(x => x.id === state.reading);
+  if (!e) { state.reading = null; return renderMain(); }
+  const d = new Date(e.date);
+  const nb = state.notebooks.length > 1 ? nbById(e.notebookId) : null;
+  setTitle(`${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`, `${WEEK[d.getDay()]} · ${pad(d.getHours())}:${pad(d.getMinutes())}${nb ? ' · #' + nb.name : ''}`);
+  $('#banner-slot').innerHTML = '';
+  const tl = $('#timeline');
+  tl.innerHTML = `<article class="reader" aria-label="${ariaLabel(e)}">
+    ${e.title ? `<h1 class="rd-title">${esc(e.title)}</h1>` : ''}
+    ${e.body.trim() ? `<div class="rd-body">${richText(e.body.trim())}</div>` : ''}
+    ${e.photos.length ? `<div class="rd-photos n${Math.min(e.photos.length, 3)}">${e.photos.map(p => `<img data-photo="${p}" data-zoom="1" alt="日记照片">`).join('')}</div>` : ''}
+    ${e.audios.length ? `<div class="audio-list">${audiosHTML(e.audios, false)}</div>` : ''}
+    ${e.links.length ? `<div class="link-list">${linksHTML(e.links, false)}</div>` : ''}
+    <div class="sheet-foot"><span>${countWords(e.title + ' ' + e.body)} 字</span><span>${e.updatedAt ? '上次修改 ' + fmtEdited(e.updatedAt) : ''}</span></div>
+  </article>`;
+  hydrate(tl);
+}
+
 /* ---------- 编辑器 ---------- */
 function newEntry(date) {
   return {
-    id: uid(), date: date || localISO(new Date()), title: '', body: '', tags: [], photos: [], audios: [], links: [], bookmarked: false,
+    id: uid(), date: date || localISO(new Date()), title: '', body: '', tags: [], photos: [], audios: [], links: [],
     notebookId: state.notebook || defaultNotebookId(),
     createdAt: new Date().toISOString(), updatedAt: null,
   };
 }
-function openEditor(entry, isNew) {
+// fromReader：从阅读页点“编辑”进来的，完成后回到阅读页
+function openEditor(entry, isNew, fromReader = false) {
   closeMPanel();
-  state.editing = { e: JSON.parse(JSON.stringify(entry)), isNew, added: [], removed: [], addedMedia: [], removedMedia: [], suggestIndex: 0 };
+  if (!fromReader) state.reading = null;
+  state.editing = { e: JSON.parse(JSON.stringify(entry)), isNew, fromReader, added: [], removed: [], addedMedia: [], removedMedia: [], hash: null, sug: [] };
   renderEditor();
   $('#editor').hidden = false;
-  (isNew ? $('#ed-body') : $('#ed-title')).focus();
+  (isNew || fromReader ? $('#ed-body') : $('#ed-title')).focus({ preventScroll: true });
+  if (fromReader) $('#ed-body').setSelectionRange(0, 0);
   autosize();
 }
 function renderEditor() {
@@ -556,7 +675,6 @@ function renderEditor() {
         <select id="ed-notebook" class="nb-select">${nbOptions}</select>
       </div>
       <div class="bar-actions">
-        <button type="button" class="icon-btn" id="ed-mark" aria-pressed="${e.bookmarked}">${e.bookmarked ? RIBBON : RIBBON_LINE}<span>${e.bookmarked ? '已收藏' : '收藏'}</span></button>
         ${isNew ? '' : '<button type="button" class="text-btn danger" id="ed-del">删除</button>'}
         <button type="button" class="btn" id="ed-done" title="Esc 或 ⌘↵">完成</button>
       </div>
@@ -564,72 +682,51 @@ function renderEditor() {
     <label class="sr-only" for="ed-title">标题</label>
     <input id="ed-title" class="ed-title" placeholder="标题（可以不写）" value="${esc(e.title)}" autocomplete="off">
     <label class="sr-only" for="ed-body">正文</label>
-    <textarea id="ed-body" class="ed-body" placeholder="今天发生了什么……">${esc(e.body)}</textarea>
+    <textarea id="ed-body" class="ed-body" placeholder="今天发生了什么……&#10;想分类就在正文里写 #标签">${esc(e.body)}</textarea>
+    <div class="tag-suggest" id="ed-tagsug" role="group" aria-label="已有标签，点一下补全" hidden></div>
 
-    <div class="ed-section">
-      <p class="ed-label">照片</p>
+    <div class="ed-attach">
       <div class="ed-photos" id="ed-photos"></div>
-      <input type="file" id="ed-file" accept="image/*" multiple hidden>
-    </div>
-
-    <div class="ed-section">
-      <p class="ed-label">录音</p>
       <div class="audio-list" id="ed-audios"></div>
-      <label class="add-line" for="ed-audio-file" id="add-audio" tabindex="0">＋ 添加录音</label>
-      <input type="file" id="ed-audio-file" accept="audio/*,.m4a,.mp3,.wav,.aac,.caf" multiple hidden>
-    </div>
-
-    <div class="ed-section">
-      <p class="ed-label">链接</p>
       <div class="link-list" id="ed-links"></div>
-      <div class="link-form">
+      <div class="link-form" id="ed-link-form" hidden>
         <label class="sr-only" for="ed-link-url">链接地址</label>
         <input id="ed-link-url" type="url" placeholder="粘贴链接，比如一首歌、一部电影" autocomplete="off">
         <label class="sr-only" for="ed-link-title">链接标题</label>
         <input id="ed-link-title" placeholder="标题（可以不写）" autocomplete="off">
-        <button type="button" class="btn ghost small" id="ed-link-add">添加</button>
+        <button type="button" class="btn ghost small" id="ed-link-add">添加链接</button>
+        <button type="button" class="text-btn" id="ed-link-cancel">取消</button>
       </div>
+      <div class="add-menu" id="ed-add-menu">
+        <button type="button" class="add-btn" id="ed-add" aria-expanded="false" aria-controls="ed-add-opts">＋ 添加</button>
+        <span class="add-opts" id="ed-add-opts" hidden>
+          <label class="add-opt" for="ed-file" id="add-photo" tabindex="0">照片</label>
+          <label class="add-opt" for="ed-audio-file" id="add-audio" tabindex="0">录音</label>
+          <button type="button" class="add-opt" id="add-link">链接</button>
+        </span>
+        <span class="add-status" id="ed-add-status" role="status"></span>
+      </div>
+      <input type="file" id="ed-file" accept="image/*" multiple hidden>
+      <input type="file" id="ed-audio-file" accept="audio/*,.m4a,.mp3,.wav,.aac,.caf" multiple hidden>
     </div>
 
-    <div class="ed-section">
-      <p class="ed-label"><label for="ed-taginput">标签</label></p>
-      <div class="tag-field" id="tag-field">
-        <span id="ed-chips" style="display:contents"></span>
-        <input id="ed-taginput" class="tag-input" placeholder="输入标签，回车添加" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="ed-suggest">
-        <ul class="suggest" id="ed-suggest" role="listbox" hidden></ul>
-      </div>
-    </div>
-
-    <div class="sheet-foot"><span id="ed-words"></span><span>${e.updatedAt ? '上次修改 ' + new Date(e.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '关闭时自动保存'}</span></div>
+    <div class="sheet-foot"><span id="ed-words"></span><span>${e.updatedAt ? '上次修改 ' + fmtEdited(e.updatedAt) : '关闭时自动保存'}</span></div>
   </div>`;
-  renderEdPhotos(); renderEdAudios(); renderEdLinks(); renderEdChips(); updateWords();
+  renderEdPhotos(); renderEdAudios(); renderEdLinks(); updateWords();
 }
 function renderEdPhotos() {
   const { e } = state.editing;
   const box = $('#ed-photos');
-  box.innerHTML = e.photos.map(p => `<div class="ed-photo"><img data-photo="${p}" data-zoom="1" alt="日记照片"><button type="button" data-rmphoto="${p}" aria-label="移除这张照片">×</button></div>`).join('')
-    + `<label class="add-tile" for="ed-file" id="add-photo" tabindex="0">＋<br>添加照片</label>`;
+  box.innerHTML = e.photos.map(p => `<div class="ed-photo"><img data-photo="${p}" data-zoom="1" alt="日记照片"><button type="button" data-rmphoto="${p}" aria-label="移除这张照片">×</button></div>`).join('');
   hydrate(box);
 }
 function renderEdAudios() {
-  const { e } = state.editing;
   const box = $('#ed-audios');
-  box.innerHTML = e.audios.map(a => `<div class="audio-item">
-      <audio controls preload="none" data-media="${a.id}"></audio>
-      <span class="name" title="${esc(a.name)}">${esc(a.name || '录音')}${a.size ? ' · ' + fmtSize(a.size) : ''}</span>
-      <button type="button" data-rmaudio="${a.id}" aria-label="移除录音 ${esc(a.name)}">移除</button></div>`).join('');
+  box.innerHTML = audiosHTML(state.editing.e.audios, true);
   hydrate(box);
 }
 function renderEdLinks() {
-  const { e } = state.editing;
-  $('#ed-links').innerHTML = e.links.map((l, i) => `<div class="link-card">
-      <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title || l.url)}</a>
-      <span class="dom">${esc(domainOf(l.url))}</span>
-      <button type="button" data-rmlink="${i}" aria-label="移除链接">×</button></div>`).join('');
-}
-function renderEdChips() {
-  const { e } = state.editing;
-  $('#ed-chips').innerHTML = e.tags.map(id => `<span class="chip">#${esc(tagName(id))}<button type="button" data-rmtag="${id}" aria-label="移除标签 ${esc(tagName(id))}">×</button></span>`).join('');
+  $('#ed-links').innerHTML = linksHTML(state.editing.e.links, true);
 }
 function updateWords() {
   const { e } = state.editing;
@@ -638,69 +735,98 @@ function updateWords() {
 function autosize() {
   const ta = $('#ed-body');
   if (!ta) return;
+  const sheet = ta.closest('.sheet');
+  const keep = sheet.scrollTop;          // 改高度时不要让页面跳回顶部
   ta.style.height = 'auto';
   ta.style.height = Math.max(240, ta.scrollHeight) + 'px';
+  sheet.scrollTop = keep;
+}
+
+/* “＋ 添加”：点开才出现 照片 / 录音 / 链接 */
+function setAddMenu(open) {
+  const btn = $('#ed-add');
+  if (!btn) return;
+  btn.setAttribute('aria-expanded', String(open));
+  $('#ed-add-opts').hidden = !open;
+}
+function setAddBusy(text) {
+  const menu = $('#ed-add-menu');
+  if (!menu) return;
+  menu.classList.toggle('busy', !!text);
+  $('#ed-add-status').textContent = text || '';
+  if (text) setAddMenu(false);
+}
+function showLinkForm(open) {
+  $('#ed-link-form').hidden = !open;
+  $('#ed-add-menu').hidden = open;
+  if (open) { setAddMenu(false); $('#ed-link-url').focus(); }
+  else { $('#ed-link-url').value = ''; $('#ed-link-title').value = ''; }
 }
 function addLinkFromForm() {
   const ed = state.editing;
   const url = normalizeURL($('#ed-link-url').value);
   if (!url) { toast('这个链接看起来不对，请检查一下'); return; }
   ed.e.links.push({ url, title: $('#ed-link-title').value.trim() });
-  $('#ed-link-url').value = ''; $('#ed-link-title').value = '';
   renderEdLinks();
-  $('#ed-link-url').focus();
+  showLinkForm(false);
 }
 
-function suggestions(value) {
-  const { e } = state.editing;
-  const raw = value.trim().replace(/^#/, '');
-  const v = raw.toLowerCase();
-  const matches = state.tags.filter(t => !e.tags.includes(t.id) && (!v || t.name.toLowerCase().includes(v))).slice(0, 8);
-  const out = matches.map(t => ({ type: 'tag', id: t.id, label: '#' + t.name }));
-  if (v && !state.tags.some(t => t.name.toLowerCase() === v)) out.push({ type: 'new', name: raw, label: `新建标签“${raw}”` });
-  return out;
+/* 正文里输入 # 时，提示已有的标签，点一下（或按 Tab）补全 */
+function hashAtCaret() {
+  const ta = $('#ed-body');
+  if (!ta || ta.selectionStart !== ta.selectionEnd) return null;
+  const m = ta.value.slice(0, ta.selectionStart).match(new RegExp(`${TAG_BEFORE}#(${TAG_CHARS}*)$`));
+  return m ? { start: ta.selectionStart - m[2].length - 1, end: ta.selectionStart, query: m[2] } : null;
 }
-function renderSuggest() {
-  const input = $('#ed-taginput');
-  const ul = $('#ed-suggest');
-  if (!input) return;
-  const items = suggestions(input.value);
-  state.editing.items = items;
-  if (!items.length || document.activeElement !== input) { ul.hidden = true; input.setAttribute('aria-expanded', 'false'); return; }
-  state.editing.suggestIndex = Math.min(state.editing.suggestIndex, items.length - 1);
-  ul.innerHTML = items.map((it, i) => `<li role="option" aria-selected="${i === state.editing.suggestIndex}"><button type="button" tabindex="-1" data-sug="${i}" class="${i === state.editing.suggestIndex ? 'active' : ''}">${esc(it.label)}</button></li>`).join('');
-  ul.hidden = false;
-  input.setAttribute('aria-expanded', 'true');
+function renderTagSuggest() {
+  const ed = state.editing;
+  const box = $('#ed-tagsug');
+  if (!ed || !box) return;
+  const h = document.activeElement && document.activeElement.id === 'ed-body' ? hashAtCaret() : null;
+  let list = [];
+  if (h) {
+    const q = h.query.toLowerCase();
+    const counts = tagCounts();
+    list = state.tags
+      .filter(t => t.name.toLowerCase() !== q && t.name.toLowerCase().includes(q))
+      .sort((a, b) => (b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q)) || (counts.get(b.id) || 0) - (counts.get(a.id) || 0))
+      .slice(0, 8);
+  }
+  ed.hash = list.length ? h : null;
+  ed.sug = list.map(t => t.name);
+  box.hidden = !list.length;
+  box.innerHTML = list.length ? `<span class="lab">已有标签</span>` + list.map((t, i) => `<button type="button" data-hashtag="${i}">#${esc(t.name)}</button>`).join('') + '<span class="lab">Tab 补全第一个</span>' : '';
 }
-async function createTag(name) {
-  name = name.trim().replace(/^#/, '').trim();
-  if (!name) return null;
-  const existing = state.tags.find(t => t.name.toLowerCase() === name.toLowerCase());
-  if (existing) return existing.id;
-  const tag = { id: uid(), name, createdAt: new Date().toISOString() };
-  await Store.put('tags', tag);
-  state.tags.push(tag);
-  return tag.id;
+function insertHashtag(name) {
+  const ed = state.editing;
+  const ta = $('#ed-body');
+  if (!ed || !ed.hash || !ta) return;
+  const { start, end } = ed.hash;
+  const after = ta.value.slice(end);
+  ta.focus({ preventScroll: true });
+  ta.setRangeText('#' + name + (/^\s/.test(after) ? '' : ' '), start, end, 'end');
+  ed.e.body = ta.value;
+  autosize(); updateWords(); renderTagSuggest();
 }
-async function applySuggestion(it) {
-  const { e } = state.editing;
-  let id;
-  try { id = it.type === 'tag' ? it.id : await createTag(it.name); }
-  catch (err) { toast('没能新建标签，可能是网络断了'); return; }
-  if (id && !e.tags.includes(id)) e.tags.push(id);
-  $('#ed-taginput').value = '';
-  state.editing.suggestIndex = 0;
-  renderEdChips();
-  renderSuggest();
+
+// 正文里的标签名 → 标签 id；还没有的标签会新建（一次性存进数据库）
+async function ensureTags(names) {
+  const fresh = [];
+  for (const name of names) {
+    if (!tagByName(name) && !fresh.some(t => t.name.toLowerCase() === name.toLowerCase())) {
+      fresh.push({ id: uid(), name, createdAt: new Date().toISOString() });
+    }
+  }
+  if (fresh.length) { await Store.putMany('tags', fresh); state.tags.push(...fresh); }
+  return names.map(n => tagByName(n).id);
 }
 
 async function addPhotos(files) {
   const ed = state.editing;
-  const btn = $('#add-photo');
-  btn.classList.add('busy'); btn.innerHTML = '上传中…';
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    setAddBusy(`照片上传中 ${i + 1} / ${files.length}……`);
     try {
-      const data = await compressImage(file);
+      const data = await compressImage(files[i]);
       const id = uid();
       await Store.putPhoto(id, data);
       state.urls.set('p:' + id, { url: data, until: Date.now() + 3600 * 1000 });
@@ -710,14 +836,14 @@ async function addPhotos(files) {
       toast(err.message && !/fetch|network/i.test(err.message) ? err.message : '照片没能上传，可能是网络断了', 5000);
     }
   }
-  if (state.editing === ed) renderEdPhotos();
+  if (state.editing === ed) { setAddBusy(''); renderEdPhotos(); }
 }
 async function addAudios(files) {
   const ed = state.editing;
-  const btn = $('#add-audio');
-  btn.classList.add('busy'); btn.textContent = '上传中…';
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     if (file.size > MAX_AUDIO) { toast(`“${file.name}”有 ${fmtSize(file.size)}，超过 50MB 的上限`, 5000); continue; }
+    setAddBusy(`录音上传中 ${i + 1} / ${files.length}……`);
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     const mime = file.type || AUDIO_EXT[ext] || 'audio/mp4';
     try {
@@ -729,7 +855,7 @@ async function addAudios(files) {
       toast(`“${file.name}”没能上传：${/mime|type/i.test(err.message || '') ? '不支持这种音频格式' : '可能是网络断了'}`, 5000);
     }
   }
-  if (state.editing === ed) { btn.classList.remove('busy'); btn.textContent = '＋ 添加录音'; renderEdAudios(); }
+  if (state.editing === ed) { setAddBusy(''); renderEdAudios(); }
 }
 
 const isEmptyEntry = e => !e.title && !e.body.trim() && !e.photos.length && !e.audios.length && !e.links.length;
@@ -738,6 +864,7 @@ async function quietly(fn) { try { await fn(); } catch (err) { console.warn(err)
 async function saveEditor() {
   const ed = state.editing;
   if (!ed) return;
+  if ($('#ed-add-menu') && $('#ed-add-menu').classList.contains('busy')) { toast('文件还在上传，请等一下再点“完成”'); return; }
   const e = ed.e;
   e.title = e.title.trim();
   if (ed.isNew && isEmptyEntry(e)) {
@@ -746,6 +873,9 @@ async function saveEditor() {
     closeEditor();
     return;
   }
+  // 标签以正文里的 #标签 为准
+  try { e.tags = await ensureTags(tagsInText(e.body)); }
+  catch (err) { toast('没能保存，可能是网络断了。内容还在编辑页里，联网后再点“完成”。', 6000); return; }
   const original = state.entries.find(x => x.id === e.id);
   const changed = !original || JSON.stringify({ ...original, updatedAt: null }) !== JSON.stringify({ ...e, updatedAt: null });
   if (changed) {
@@ -763,7 +893,7 @@ async function saveEditor() {
     if (i >= 0) state.entries[i] = e; else state.entries.push(e);
   }
   closeEditor();
-  render();
+  render();             // 从阅读页进来的，会回到这篇的阅读页
   if (ed.isNew) toast('已保存');
 }
 function closeEditor() {
@@ -821,6 +951,63 @@ async function deleteNotebook(id) {
   } catch (err) { toast('没能删除日记本，可能是网络断了'); await loadAll(); render(); return; }
   state.notebooks = state.notebooks.filter(n => n.id !== id);
   if (state.notebook === id) state.notebook = null;
+  render();
+}
+
+/* ---------- 标签：改名 / 删除（正文里的 #标签 一起改） ---------- */
+function tagDialog(tag) {
+  if (!tag) return;
+  const n = state.entries.filter(e => e.tags.includes(tag.id)).length;
+  const box = $('#confirm');
+  box.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="tg-msg">
+    <p id="tg-msg">标签 <span class="htag">#${esc(tag.name)}</span>，用在 ${n} 篇日记里。</p>
+    <label class="dialog-label" for="tg-name">改名（正文里的 #${esc(tag.name)} 会一起改）</label>
+    <input id="tg-name" class="dialog-input" value="${esc(tag.name)}" autocomplete="off">
+    <div class="row"><button type="button" class="text-btn danger" id="tg-del">删除这个标签</button><span class="grow"></span>
+      <button type="button" class="btn ghost" id="tg-no">取消</button><button type="button" class="btn" id="tg-save">改名</button></div></div>`;
+  box.hidden = false;
+  $('#tg-name').focus(); $('#tg-name').select();
+  const close = () => { box.hidden = true; box.innerHTML = ''; document.removeEventListener('keydown', onKey, true); };
+  const onKey = ev => {
+    if (ev.key === 'Escape') { ev.stopPropagation(); close(); }
+    if (ev.key === 'Enter' && ev.target.id === 'tg-name' && !ev.isComposing) { ev.preventDefault(); ev.stopPropagation(); $('#tg-save').click(); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  $('#tg-no').onclick = close;
+  box.onclick = ev => { if (ev.target === box) close(); };
+  $('#tg-save').onclick = async () => { const name = $('#tg-name').value; close(); await renameTag(tag, name); };
+  $('#tg-del').onclick = async () => { close(); await deleteTag(tag); };
+}
+async function renameTag(tag, input) {
+  const name = input.trim().replace(/^#/, '');
+  if (!name || name === tag.name) return;
+  if (!validTagName(name)) { toast('标签名里不能有空格或标点，也不能全是数字'); return; }
+  if (state.tags.some(x => x.id !== tag.id && x.name.toLowerCase() === name.toLowerCase())) { toast('已经有同名标签了'); return; }
+  const re = oneTagRE(tag.name);
+  const touched = state.entries.filter(e => e.tags.includes(tag.id)).map(e => ({ ...e, body: e.body.replace(re, (m, before) => before + '#' + name) }));
+  try {
+    await Store.put('tags', { ...tag, name });
+    await Store.putMany('entries', touched);
+  } catch (err) { toast('没能改名，可能是网络断了'); await loadAll(); render(); return; }
+  tag.name = name;
+  touched.forEach(e => { state.entries[state.entries.findIndex(x => x.id === e.id)] = e; });
+  render();
+  toast(`已改名为 #${name}`);
+}
+async function deleteTag(tag) {
+  if (!await askConfirm(`删除标签“${tag.name}”？日记会保留，正文里的“#${tag.name}”会变成普通文字“${tag.name}”。`, '删除标签')) return;
+  const re = oneTagRE(tag.name);
+  const touched = state.entries.filter(e => e.tags.includes(tag.id)).map(e => ({
+    ...e, tags: e.tags.filter(x => x !== tag.id),
+    body: e.body.replace(re, (m, before) => before + m.slice(before.length + 1)),
+  }));
+  try {
+    await Store.putMany('entries', touched);
+    await Store.del('tags', tag.id);
+  } catch (err) { toast('没能删除标签，可能是网络断了'); await loadAll(); render(); return; }
+  touched.forEach(e => { state.entries[state.entries.findIndex(x => x.id === e.id)] = e; });
+  state.tags = state.tags.filter(x => x.id !== tag.id);
+  state.tagSel = state.tagSel.filter(x => x !== tag.id);
   render();
 }
 
@@ -934,13 +1121,48 @@ async function loadAll() {
   state.tags = await Store.all('tags');
   const fix = [];
   state.entries = (await Store.all('entries')).map(raw => {
-    const e = { tags: [], photos: [], audios: [], links: [], bookmarked: false, title: '', body: '', ...raw };
+    const e = { tags: [], photos: [], audios: [], links: [], title: '', body: '', ...raw };
     if (!ids.has(e.notebookId)) { e.notebookId = fallback; fix.push(e); }
     return e;
   });
   if (fix.length) await Store.putMany('entries', fix);
-  if (state.tag && !tagById(state.tag)) state.tag = null;
+  try { await syncTags(); } catch (err) { console.warn('标签整理失败，下次打开会再试', err); }
+  state.tagSel = state.tagSel.filter(id => tagById(id));
   if (state.notebook && !nbById(state.notebook)) state.notebook = null;
+}
+
+/* v0.5 起，标签以正文里的 #标签 为准。每次打开时检查一遍，只有需要时才写入：
+   1. 以前用标签框打的标签，如果正文里没有，就补到正文最后一行（比如“#生活 #散步”）。
+      标签名里有空格或标点的，先改成下划线，不然写进正文会断开。
+   2. 根据正文里的 #标签 更新每篇日记的 tags（正文里新出现的标签会自动新建）。
+   补过一次之后正文里就有了，不会重复补。 */
+async function syncTags() {
+  const renamed = [];
+  for (const t of state.tags) {
+    if (validTagName(t.name)) continue;
+    let name = t.name.trim().replace(new RegExp(`[${TAG_STOP}]+`, 'g'), '_').replace(/^_+|_+$/g, '');
+    if (!name || isNumberTag(name)) name = '标签' + (name || t.id.slice(-4));
+    while (state.tags.some(x => x !== t && x.name.toLowerCase() === name.toLowerCase())) name += '_';
+    t.name = name;
+    renamed.push(t);
+  }
+  const changed = new Set();
+  for (const e of state.entries) {
+    const inBody = new Set(tagsInText(e.body).map(n => n.toLowerCase()));
+    const missing = e.tags.map(tagById).filter(t => t && !inBody.has(t.name.toLowerCase()));
+    if (!missing.length) continue;
+    const body = e.body.replace(/\s+$/, '');
+    e.body = body + (body ? '\n\n' : '') + missing.map(t => '#' + t.name).join(' ');
+    changed.add(e);
+  }
+  if (renamed.length) await Store.putMany('tags', renamed);
+  await ensureTags([...new Set(state.entries.flatMap(e => tagsInText(e.body)))]);
+  for (const e of state.entries) {
+    const want = tagsInText(e.body).map(n => tagByName(n).id);
+    const same = want.length === e.tags.length && want.every(id => e.tags.includes(id));
+    if (!same) { e.tags = want; changed.add(e); }
+  }
+  if (changed.size) await Store.putMany('entries', [...changed]);
 }
 
 /* ---------- 手机：顶部按钮打开的面板 ----------
@@ -971,21 +1193,26 @@ function closeMPanel() {
 window.matchMedia('(min-width: 761px)').addEventListener('change', closeMPanel);
 
 /* ---------- 事件 ---------- */
-function goJournal() { state.page = 'journal'; state.section = 'journal'; }
+function goJournal() { state.page = 'journal'; state.section = 'journal'; state.reading = null; }
 function shiftAnchor(days) { state.anchor = addDays(state.anchor, days); state.calMonth = state.anchor.slice(0, 7); render(); }
 const scrollTop = () => { $('#main').scrollTop = 0; window.scrollTo(0, 0); };
 
 document.addEventListener('click', async ev => {
   if (ev.target.closest('a[href]')) return; // 链接照常打开，不打开编辑页
-  const t = ev.target.closest('button, .entry, label.add-tile, img[data-zoom], #mscrim');
+  const t = ev.target.closest('button, .entry, img[data-zoom], #mscrim');
   if (!t) return;
   if (t.id === 'mscrim') return closeMPanel();
+  if (t.matches('img[data-zoom]')) return showLightbox(t.src);
+
+  // 阅读页
+  if (t.id === 'rd-back') return closeReader();
+  if (t.id === 'rd-edit') { const e = state.entries.find(x => x.id === state.reading); if (e) openEditor(e, false, true); return; }
 
   // 板块 / 页面 / 手机面板
-  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; closeMPanel(); render(); scrollTop(); return; }
+  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
   if (t.matches('[data-mpanel]')) return openMPanel(t.dataset.mpanel);
-  if (t.matches('[data-page]')) { state.page = t.dataset.page; closeMPanel(); render(); scrollTop(); return; }
-  if (t.id === 'stats-summary') { state.page = 'stats'; render(); scrollTop(); return; }
+  if (t.matches('[data-page]')) { state.page = t.dataset.page; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
+  if (t.id === 'stats-summary') { state.page = 'stats'; state.reading = null; render(); scrollTop(); return; }
   if (t.matches('[data-year]')) { state.statsYear = t.dataset.year; renderMain(); return; }
 
   // 日历
@@ -1008,26 +1235,28 @@ document.addEventListener('click', async ev => {
   // 视图 / 日记本 / 标签
   if (t.matches('[data-view]')) { goJournal(); state.view = t.dataset.view; closeMPanel(); render(); scrollTop(); return; }
   if (t.matches('[data-nb]')) { goJournal(); state.notebook = t.dataset.nb || null; closeMPanel(); render(); scrollTop(); return; }
-  if (t.matches('[data-tag]')) { goJournal(); state.tag = state.tag === t.dataset.tag ? null : t.dataset.tag; closeMPanel(); render(); scrollTop(); return; }
+  if (t.matches('[data-collapse]')) {
+    if (t.closest('#mpanel')) return;          // 手机面板里不收起
+    const id = t.dataset.collapse;
+    if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id);
+    writePref('collapsed', [...state.collapsed]);
+    renderSide();
+    return;
+  }
+  // 标签可以多选：再点一次取消。手机上面板不关，方便连着选几个
+  if (t.matches('[data-tag]')) {
+    const id = t.dataset.tag;
+    goJournal();
+    state.tagSel = state.tagSel.includes(id) ? state.tagSel.filter(x => x !== id) : [...state.tagSel, id];
+    render(); scrollTop();
+    return;
+  }
+  if (t.id === 'clear-tags') { state.tagSel = []; render(); scrollTop(); return; }
   if (t.id === 'add-notebook') { state.addingNotebook = true; state.editNotebooks = false; renderSide(); $('#new-nb').focus(); return; }
   if (t.id === 'toggle-nb-edit') { state.editNotebooks = !state.editNotebooks; state.addingNotebook = false; renderSide(); return; }
   if (t.matches('[data-delnb]')) return deleteNotebook(t.dataset.delnb);
   if (t.id === 'toggle-tag-edit') { state.editTags = !state.editTags; renderSide(); return; }
-  if (t.matches('[data-deltag]')) {
-    const tag = tagById(t.dataset.deltag);
-    if (!await askConfirm(`删除标签“${tag.name}”？日记本身会保留，只是去掉这个标签。`, '删除标签')) return;
-    const touched = state.entries.filter(e => e.tags.includes(tag.id));
-    try {
-      touched.forEach(e => { e.tags = e.tags.filter(x => x !== tag.id); });
-      await Store.putMany('entries', touched);
-      await Store.del('tags', tag.id);
-    } catch (err) { toast('没能删除标签，可能是网络断了'); await loadAll(); render(); return; }
-    state.tags = state.tags.filter(x => x.id !== tag.id);
-    if (state.tag === tag.id) state.tag = null;
-    render();
-    return;
-  }
-
+  if (t.matches('[data-tagedit]')) return tagDialog(tagById(t.dataset.tagedit));
   // 备份 / 账户
   if (t.id === 'export-btn') { closeMPanel(); return exportData(); }
   if (t.id === 'import-btn') return $('#import-file').click();
@@ -1053,27 +1282,22 @@ document.addEventListener('click', async ev => {
   if (t.matches('[data-shift]')) return shiftAnchor(+t.dataset.shift);
   if (t.id === 'to-today') { state.anchor = todayKey(); state.calMonth = state.anchor.slice(0, 7); render(); return; }
   if (t.id === 'clear-day') { state.day = null; render(); return; }
-  if (t.id === 'clear-filters') { state.notebook = null; state.tag = null; state.query = ''; state.day = null; $('#search').value = ''; render(); return; }
-  if (t.classList.contains('entry')) {
-    const e = state.entries.find(x => x.id === t.dataset.id);
-    if (e) openEditor(e, false);
-    return;
-  }
+  if (t.id === 'clear-filters') { state.notebook = null; state.tagSel = []; state.query = ''; state.day = null; $('#search').value = ''; render(); return; }
+  if (t.classList.contains('entry')) return openReader(t.dataset.id);
 
   // 编辑器
   if (!state.editing) return;
   const ed = state.editing;
   if (t.id === 'ed-done') return saveEditor();
-  if (t.id === 'ed-mark') {
-    ed.e.bookmarked = !ed.e.bookmarked;
-    t.setAttribute('aria-pressed', ed.e.bookmarked);
-    t.innerHTML = `${ed.e.bookmarked ? RIBBON : RIBBON_LINE}<span>${ed.e.bookmarked ? '已收藏' : '收藏'}</span>`;
-    return;
-  }
+  if (t.id === 'ed-add') return setAddMenu(t.getAttribute('aria-expanded') !== 'true');
+  if (t.id === 'add-link') return showLinkForm(true);
+  if (t.id === 'ed-link-cancel') return showLinkForm(false);
+  if (t.matches('[data-hashtag]')) return insertHashtag(ed.sug[+t.dataset.hashtag]);
   if (t.id === 'ed-del') {
     if (!await askConfirm('删除这篇日记？删除后无法恢复。', '删除')) return;
     try { await deleteEntry(ed.e.id); } catch (err) { toast('没能删除，可能是网络断了，请稍后再试。', 5000); return; }
     state.editing = null;
+    state.reading = null;
     $('#editor').hidden = true;
     render();
     toast('已删除');
@@ -1097,13 +1321,14 @@ document.addEventListener('click', async ev => {
   }
   if (t.matches('[data-rmlink]')) { ed.e.links.splice(+t.dataset.rmlink, 1); renderEdLinks(); return; }
   if (t.id === 'ed-link-add') return addLinkFromForm();
-  if (t.matches('img[data-zoom]')) return showLightbox(t.src);
-  if (t.matches('[data-rmtag]')) { ed.e.tags = ed.e.tags.filter(x => x !== t.dataset.rmtag); renderEdChips(); return; }
-  if (t.matches('[data-sug]')) return applySuggestion(ed.items[+t.dataset.sug]);
 });
 
-// 点编辑纸外面的空白处 = 完成
-$('#editor').addEventListener('mousedown', ev => { if (ev.target.id === 'editor') saveEditor(); });
+// 点纸外面的空白处：编辑时 = 完成，阅读时 = 关闭
+$('#editor').addEventListener('mousedown', ev => {
+  if (ev.target.closest('#ed-tagsug')) { ev.preventDefault(); return; }   // 点标签提示时不让正文失去焦点
+  if (ev.target.id !== 'editor') return;
+  if (state.editing) saveEditor();
+});
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 
 document.addEventListener('input', ev => {
@@ -1113,25 +1338,15 @@ document.addEventListener('input', ev => {
   if (!state.editing) return;
   const e = state.editing.e;
   if (t.id === 'ed-title') { e.title = t.value; updateWords(); }
-  if (t.id === 'ed-body') { e.body = t.value; autosize(); updateWords(); }
+  if (t.id === 'ed-body') { e.body = t.value; autosize(); updateWords(); renderTagSuggest(); }
   if (t.id === 'ed-date' && t.value) e.date = t.value;
   if (t.id === 'ed-notebook') e.notebookId = t.value;
-  if (t.id === 'ed-taginput') { state.editing.suggestIndex = 0; renderSuggest(); }
 });
 document.addEventListener('change', async ev => {
   const t = ev.target;
-  if (t.id === 'ed-file' && t.files.length) { await addPhotos([...t.files]); t.value = ''; }
-  if (t.id === 'ed-audio-file' && t.files.length) { await addAudios([...t.files]); t.value = ''; }
+  if (t.id === 'ed-file' && t.files.length) { const files = [...t.files]; t.value = ''; await addPhotos(files); }
+  if (t.id === 'ed-audio-file' && t.files.length) { const files = [...t.files]; t.value = ''; await addAudios(files); }
   if (t.id === 'import-file' && t.files[0]) { closeMPanel(); await importData(t.files[0]); t.value = ''; }
-  if (t.matches('[data-rename]')) {
-    const tag = tagById(t.dataset.rename);
-    const name = t.value.trim().replace(/^#/, '');
-    if (!name) { t.value = tag.name; return; }
-    if (state.tags.some(x => x.id !== tag.id && x.name.toLowerCase() === name.toLowerCase())) { toast('已经有同名标签了'); t.value = tag.name; return; }
-    try { await Store.put('tags', { ...tag, name }); } catch (err) { toast('没能改名，可能是网络断了'); t.value = tag.name; return; }
-    tag.name = name;
-    renderMain();
-  }
   if (t.matches('[data-nbrename]')) {
     const nb = nbById(t.dataset.nbrename);
     const name = t.value.trim();
@@ -1142,9 +1357,11 @@ document.addEventListener('change', async ev => {
     renderMain();
   }
 });
-document.addEventListener('focusin', ev => { if (ev.target.id === 'ed-taginput') renderSuggest(); });
+// 正文里移动光标时，更新 #标签 提示；离开正文就收起
+document.addEventListener('keyup', ev => { if (ev.target.id === 'ed-body' && /^Arrow|Home|End/.test(ev.key)) renderTagSuggest(); });
+document.addEventListener('pointerup', ev => { if (ev.target.id === 'ed-body') setTimeout(renderTagSuggest, 0); });
 document.addEventListener('focusout', ev => {
-  if (ev.target.id === 'ed-taginput') setTimeout(() => { const ul = $('#ed-suggest'); if (ul && !ul.contains(document.activeElement)) ul.hidden = true; }, 150);
+  if (ev.target.id === 'ed-body') setTimeout(renderTagSuggest, 200);
   if (ev.target.id === 'new-nb') setTimeout(() => finishAddingNotebook(true), 0);
 });
 
@@ -1161,20 +1378,10 @@ document.addEventListener('keydown', ev => {
   }
 
   if (state.editing) {
+    if (ev.key === 'Escape' && !$('#ed-link-form').hidden) { ev.preventDefault(); showLinkForm(false); return; }
     if (ev.key === 'Escape' || (mod && ev.key === 'Enter')) { ev.preventDefault(); saveEditor(); return; }
+    if (ev.target.id === 'ed-body' && ev.key === 'Tab' && !ev.isComposing && state.editing.hash && state.editing.sug.length) { ev.preventDefault(); insertHashtag(state.editing.sug[0]); return; }
     if ((ev.target.id === 'ed-link-url' || ev.target.id === 'ed-link-title') && ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); addLinkFromForm(); return; }
-    if (ev.target.id === 'ed-taginput') {
-      const items = state.editing.items || [];
-      if (ev.key === 'ArrowDown' && items.length) { ev.preventDefault(); state.editing.suggestIndex = (state.editing.suggestIndex + 1) % items.length; renderSuggest(); }
-      else if (ev.key === 'ArrowUp' && items.length) { ev.preventDefault(); state.editing.suggestIndex = (state.editing.suggestIndex - 1 + items.length) % items.length; renderSuggest(); }
-      else if ((ev.key === 'Enter' || ev.key === ',' || ev.key === '，') && !ev.isComposing) {
-        if (!ev.target.value.trim()) { if (ev.key === 'Enter') ev.preventDefault(); return; }
-        ev.preventDefault();
-        applySuggestion(items[state.editing.suggestIndex] || { type: 'new', name: ev.target.value });
-      } else if (ev.key === 'Backspace' && !ev.target.value && state.editing.e.tags.length) {
-        state.editing.e.tags.pop(); renderEdChips();
-      }
-    }
     if ((ev.target.id === 'add-photo' || ev.target.id === 'add-audio') && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); ev.target.click(); }
     return;
   }
@@ -1186,6 +1393,11 @@ document.addEventListener('keydown', ev => {
     return;
   }
   if (state.section !== 'journal') return;
+  if (state.reading && state.page === 'journal') {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeReader(); }
+    else if (!mod && ev.key.toLowerCase() === 'e') { ev.preventDefault(); $('#rd-edit').click(); }
+    return;
+  }
   if (!mod && ev.key.toLowerCase() === 'n') { ev.preventDefault(); $('#new-btn').click(); return; }
   if (state.page === 'journal' && state.view !== 'timeline' && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) { ev.preventDefault(); shiftAnchor(ev.key === 'ArrowLeft' ? -1 : 1); return; }
   if (ev.key === 'Enter' && document.activeElement.classList.contains('entry')) document.activeElement.click();
@@ -1202,6 +1414,7 @@ function showLogin(message) {
 async function boot(session) {
   Store.setUser(session.user.id);
   $('#account-email').textContent = session.user.email || '';
+  $('#app-version').textContent = '版本 v' + APP_VERSION;
   $('#login').hidden = true;
   $('#loading').hidden = false;
   try { await loadAll(); }

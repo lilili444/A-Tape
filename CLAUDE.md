@@ -36,9 +36,11 @@
 - 日记（entry）结构：
   ```js
   { id, date: 'YYYY-MM-DDTHH:MM', title, body, tags: [tagId], photos: [photoId],
-    audios: [{ id, name, mime, size }], links: [{ url, title }], bookmarked,
-    notebookId, createdAt, updatedAt, source?, sourceFile? }
+    audios: [{ id, name, mime, size }], links: [{ url, title }],
+    notebookId, createdAt, updatedAt, source?, sourceFile?, bookmarked? }
   ```
+  `bookmarked` 是 v0.5 去掉的收藏功能留下的旧字段，不读也不删。
+- **标签以正文为准**（v0.5 起）：正文里的 `#标签` 在保存时由 `tagsInText()` 识别，再由 `ensureTags()` 换成 `tags: [tagId]`。不要再做单独的标签输入。`loadAll()` 里的 `syncTags()` 负责旧数据迁移和保持一致。改名、删除标签要同时改正文（`oneTagRE`）。
   `source: 'apple-journal'` 的 319 篇是从苹果手记导入的（2026-11-22），只有日期没有时间，所以同一天从 12:00 起每篇加一分钟。
 - 日记本：`{ id, name, order, createdAt }`；标签：`{ id, name, createdAt }`。
 - 备份文件格式（导出 / 导入）：`{ app: 'paper-journal', version: 3, notebooks, tags, entries, photos: [{id, data}], media: [{id, mime, data}] }`。`app` 的值不要改，否则旧备份导不进去。
@@ -51,8 +53,11 @@
 - 写入失败不能丢内容：保存失败时编辑页保持打开并提示，参考 `saveEditor()`。
 - 界面文字全部中文，按钮写清楚会发生什么。
 - 视觉只用 `:root` 里的变量（`--paper --sheet --ink --ink-soft --rule --accent --danger`、`--font-display --font-body`），不要硬写新颜色。
+- 电脑侧栏的“视图 / 日记本 / 标签”可以点名字收起（`data-collapse`，存在 localStorage）；手机面板里始终展开。
 - 手机版：顶部 6 个按钮（视图 / 日记本 / 标签 / 搜索 / 统计 / 备份），点开才展开面板；面板里显示的是侧栏的同一块 DOM（`openMPanel` 把它搬过去，关闭时 `restoreSide` 搬回来），所以电脑和手机共用一套功能代码。
-- **缓存**：GitHub Pages 让浏览器缓存 10 分钟。**改了 `style.css`、`app.js` 或 `config.js`，必须把 `index.html` 里三处 `?v=` 的数字一起加 1**，否则会出现新页面配旧程序、页面全乱的情况（2026-11-22 发生过）。
+- 点日记先打开阅读页（`openReader`，显示在右栏主区，`state.reading` 记着是哪篇；“← 返回”回到列表原位置），点“编辑”才进编辑页（`openEditor(e, false, true)`，浮在上面的 `#editor` 层），完成后回到阅读页。
+- 侧栏标签的编辑模式不换成输入框：点标签弹出 `tagDialog`（改名 / 删除）。
+- **版本号和缓存**：版本号是 `v大.功能.修补`（规则见 `docs/开发记录.md`）。GitHub Pages 让浏览器缓存 10 分钟，所以**改了 `style.css`、`app.js` 或 `config.js`，就要升版本号：改 `app.js` 的 `APP_VERSION`，并把 `index.html` 里三处 `?v=` 改成同一个版本号**，否则会出现新页面配旧程序、页面全乱的情况（2026-11-22 发生过）。然后在开发记录里补一条这个版本改了什么。
 
 ## 安全
 
@@ -71,4 +76,3 @@
 - [ ] 纪念日 / 倒数日板块（数据用 `store: 'anniversaries'`；提醒可以考虑导出到苹果日历；手机端需要加板块切换）
 - [ ] 每周用 GitHub Actions 自动备份到另一个**私有**仓库（Secret key 只能放在 GitHub Secrets）
 - [ ] 项目名待定：改 `index.html` 的 `<title>` 和登录页 `<h1>`
-- [ ] 待确认：收藏按钮要不要保留

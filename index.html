@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- 项目名称：改这里和下面 login 里的 <h1> 即可。
-     每次更新 style.css / app.js 后，把下面三处 ?v= 的数字加 1，浏览器就不会用旧的缓存文件。 -->
+     版本号：每次更新 style.css / app.js / config.js 后，把下面三处 ?v= 改成新的版本号（和 app.js 里的 APP_VERSION 一致），
+     浏览器就不会用旧的缓存文件。版本号怎么写见 docs/开发记录.md。 -->
 <title>手记</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=0.5.0">
 </head>
 <body>
 <div class="app">
@@ -31,17 +32,17 @@
     </section>
 
     <section class="sec" id="sec-views" aria-labelledby="lbl-views">
-      <p class="nav-label" id="lbl-views">视图</p>
+      <p class="nav-label"><button type="button" class="sec-toggle" id="lbl-views" data-collapse="sec-views" aria-expanded="true">视图</button></p>
       <ul class="nav" id="views"></ul>
     </section>
 
     <section class="sec" id="sec-nb" aria-labelledby="lbl-nb">
-      <p class="nav-label"><span id="lbl-nb">日记本</span><span class="acts"><button type="button" id="add-notebook">新建</button><button type="button" id="toggle-nb-edit">编辑</button></span></p>
+      <p class="nav-label"><button type="button" class="sec-toggle" id="lbl-nb" data-collapse="sec-nb" aria-expanded="true">日记本</button><span class="acts"><button type="button" id="add-notebook">新建</button><button type="button" id="toggle-nb-edit">编辑</button></span></p>
       <ul class="nav" id="notebook-list"></ul>
     </section>
 
     <section class="sec" id="sec-tags" aria-labelledby="lbl-tags">
-      <p class="nav-label"><span id="lbl-tags">标签</span><button type="button" id="toggle-tag-edit">编辑</button></p>
+      <p class="nav-label"><button type="button" class="sec-toggle" id="lbl-tags" data-collapse="sec-tags" aria-expanded="true">标签</button><span class="acts"><button type="button" id="clear-tags" hidden>清除</button><button type="button" id="toggle-tag-edit">编辑</button></span></p>
       <ul class="nav" id="tag-list"></ul>
     </section>
 
@@ -54,7 +55,7 @@
       <button type="button" class="link-btn" id="export-btn">导出备份</button>
       <button type="button" class="link-btn" id="import-btn">导入备份</button>
       <input type="file" id="import-file" accept="application/json,.json" hidden>
-      <p class="account"><span id="account-email"></span><button type="button" class="link-btn" id="signout-btn">退出登录</button></p>
+      <p class="account"><span id="account-email"></span><button type="button" class="link-btn" id="signout-btn">退出登录</button><span class="version" id="app-version"></span></p>
     </section>
   </aside>
 
@@ -72,9 +73,11 @@
 
   <main class="main" id="main">
     <div class="main-inner">
+      <button type="button" class="back-link" id="rd-back" title="Esc" hidden>← 返回</button>
       <div class="topbar">
-        <h2 id="view-title">全部日记</h2>
+        <h2 id="view-title">所有</h2>
         <button type="button" class="btn" id="new-btn" title="快捷键 N">写一篇</button>
+        <button type="button" class="btn" id="rd-edit" title="快捷键 E" hidden>编辑</button>
       </div>
       <div id="banner-slot"></div>
       <div id="timeline"></div>
@@ -103,10 +106,10 @@
 <div class="overlay lightbox" id="lightbox" hidden><img alt="照片大图"></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="config.js?v=4"></script>
+<script src="config.js?v=0.5.0"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9"></script>
 <!-- 本地预览：网址后面加 ?mock 就用假数据，不连 Supabase（见 dev/mock.js） -->
 <script>if (/[?&]mock\b/.test(location.search)) document.write('<script src="dev/mock.js"><\/script>');</script>
-<script src="app.js?v=4"></script>
+<script src="app.js?v=0.5.0"></script>
 </body>
 </html>
