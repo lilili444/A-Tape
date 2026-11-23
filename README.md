@@ -34,6 +34,8 @@
 ```
 A-Tape/
 ├── index.html           页面骨架：侧栏、手机顶部栏、主区、登录页
+├── favicon-32.png       浏览器标签页图标（32×32）
+├── icon-180.png         iPhone / iPad 加到主屏幕的图标（180×180）
 ├── style.css            全部视觉：颜色、字体、间距、版式（自己装修主要改这里）
 ├── app.js               全部功能：读写数据、日历、视图、统计、编辑器、登录
 ├── config.js            Supabase 的网址和 Publishable key（可以公开）
