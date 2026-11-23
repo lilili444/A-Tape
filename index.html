@@ -6,11 +6,11 @@
 <!-- 项目名称：改这里和下面 login 里的 <h1> 即可。
      版本号：每次更新 style.css / app.js / config.js 后，把下面三处 ?v= 改成新的版本号（和 app.js 里的 APP_VERSION 一致），
      浏览器就不会用旧的缓存文件。版本号怎么写见 docs/开发记录.md。 -->
-<title>手记</title>
+<title>磁带</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=0.6.0">
+<link rel="stylesheet" href="style.css?v=0.6.1">
 </head>
 <body>
 <div class="app">
@@ -99,8 +99,8 @@
 
 <div class="login" id="login" hidden>
   <form class="login-sheet" id="login-form" novalidate>
-    <h1>手记</h1>
-    <p class="muted">登录后才能看到你的日记。</p>
+    <h1>磁带</h1>
+    <p class="muted">登录后才能看到你的手记和纪念日。</p>
     <label for="login-email">邮箱</label>
     <input id="login-email" type="email" autocomplete="username" required>
     <label for="login-password">密码</label>
@@ -116,10 +116,10 @@
 <div class="overlay lightbox" id="lightbox" hidden><img alt="照片大图"></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="config.js?v=0.6.0"></script>
+<script src="config.js?v=0.6.1"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9"></script>
 <!-- 本地预览：网址后面加 ?mock 就用假数据，不连 Supabase（见 dev/mock.js） -->
 <script>if (/[?&]mock\b/.test(location.search)) document.write('<script src="dev/mock.js"><\/script>');</script>
-<script src="app.js?v=0.6.0"></script>
+<script src="app.js?v=0.6.1"></script>
 </body>
 </html>
