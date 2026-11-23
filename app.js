@@ -345,14 +345,12 @@ function renderSide() {
   const tags = [...state.tags].sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0) || a.name.localeCompare(b.name, 'zh'));
   const shown = state.editTags ? tags : tags.filter(t => counts.get(t.id) || state.tagSel.includes(t.id));
   const list = $('#tag-list');
-  list.className = state.editTags ? 'nav' : 'nav cloud';
+  list.className = state.editTags ? 'nav cloud editing' : 'nav cloud';
   if (!shown.length) list.innerHTML = '<li><p class="muted">在正文里写 #标签，就会出现在这里。</p></li>';
   else if (state.editTags) {
-    list.innerHTML = shown.map(t => `<li class="edit-row">
-      <label class="sr-only" for="tag-name-${t.id}">标签名称</label>
-      <input id="tag-name-${t.id}" data-rename="${t.id}" value="${esc(t.name)}">
-      <span class="n">${counts.get(t.id) || 0}</span>
-      <button type="button" data-deltag="${t.id}" aria-label="删除标签 ${esc(t.name)}">删除</button></li>`).join('');
+    // 编辑模式：样子不变，鼠标移上去变红；点一下才弹出“改名 / 删除”
+    list.innerHTML = shown.map(t => `<li><button type="button" data-tagedit="${t.id}" title="改名或删除">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`).join('')
+      + '<li class="hint"><p class="muted">点标签可以改名或删除。</p></li>';
   } else {
     list.innerHTML = shown.map(t => {
       const on = state.tagSel.includes(t.id);
@@ -575,11 +573,15 @@ function renderDays() {
 
 function renderMain() {
   const journal = state.section === 'journal';
-  $('#new-btn').hidden = !journal;
-  $('#fab').hidden = !journal;
+  const reading = journal && state.page === 'journal' && !!state.reading;
+  $('#new-btn').hidden = !journal || reading;
+  $('#fab').hidden = !journal || reading;
+  $('#rd-back').hidden = !reading;
+  $('#rd-edit').hidden = !reading;
   $('#mbar').hidden = !journal;
   if (!journal) return renderDays();
   if (state.page === 'stats') return renderStatsPage();
+  if (reading) return renderReader();
   $('#banner-slot').innerHTML = '';
   const list = filtered();
   const view = VIEWS.find(v => v.id === state.view);
@@ -588,7 +590,6 @@ function renderMain() {
 function render() { renderSide(); renderMain(); }
 
 /* ---------- 阅读页：点日记先看全文，右上角“编辑”才进编辑页 ---------- */
-const fmtLong = iso => { const d = new Date(iso); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${WEEK[d.getDay()]} · ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const fmtEdited = iso => new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 function audiosHTML(audios, removable) {
   return audios.map(a => `<div class="audio-item">
@@ -602,40 +603,44 @@ function linksHTML(links, removable) {
       <span class="dom">${esc(domainOf(l.url))}</span>
       ${removable ? `<button type="button" data-rmlink="${i}" aria-label="移除链接">×</button>` : ''}</div>`).join('');
 }
+// 阅读页直接显示在右栏（主区）。“← 返回”回到列表，并回到原来看到的位置
+const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
+const mainScroll = () => isPhone() ? window.scrollY : $('#main').scrollTop;
+const setMainScroll = y => { $('#main').scrollTop = y; window.scrollTo(0, y); };
 function openReader(id) {
-  const e = state.entries.find(x => x.id === id);
-  if (!e) return;
+  if (!state.entries.some(x => x.id === id)) return;
   closeMPanel();
+  if (!state.reading) state.listScroll = mainScroll();
   state.reading = id;
+  renderMain();
+  setMainScroll(0);
+  $('#rd-back').focus({ preventScroll: true });
+}
+function closeReader() {
+  const id = state.reading;
+  state.reading = null;
+  renderMain();
+  setMainScroll(state.listScroll || 0);
+  const card = id && document.querySelector(`.entry[data-id="${id}"]`);
+  if (card) card.focus({ preventScroll: true });
+}
+function renderReader() {
+  const e = state.entries.find(x => x.id === state.reading);
+  if (!e) { state.reading = null; return renderMain(); }
+  const d = new Date(e.date);
   const nb = state.notebooks.length > 1 ? nbById(e.notebookId) : null;
-  const box = $('#editor');
-  box.innerHTML = `
-  <div class="sheet reader" role="dialog" aria-modal="true" aria-label="阅读日记" tabindex="-1">
-    <div class="sheet-bar">
-      <div class="bar-left"><span class="rd-date">${fmtLong(e.date)}</span>${nb ? `<span class="rd-nb">#${esc(nb.name)}</span>` : ''}</div>
-      <div class="bar-actions">
-        <button type="button" class="text-btn" id="rd-close" title="Esc">关闭</button>
-        <button type="button" class="btn" id="rd-edit">编辑</button>
-      </div>
-    </div>
+  setTitle(`${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`, `${WEEK[d.getDay()]} · ${pad(d.getHours())}:${pad(d.getMinutes())}${nb ? ' · #' + nb.name : ''}`);
+  $('#banner-slot').innerHTML = '';
+  const tl = $('#timeline');
+  tl.innerHTML = `<article class="reader" aria-label="${ariaLabel(e)}">
     ${e.title ? `<h1 class="rd-title">${esc(e.title)}</h1>` : ''}
     ${e.body.trim() ? `<div class="rd-body">${richText(e.body.trim())}</div>` : ''}
     ${e.photos.length ? `<div class="rd-photos n${Math.min(e.photos.length, 3)}">${e.photos.map(p => `<img data-photo="${p}" data-zoom="1" alt="日记照片">`).join('')}</div>` : ''}
     ${e.audios.length ? `<div class="audio-list">${audiosHTML(e.audios, false)}</div>` : ''}
     ${e.links.length ? `<div class="link-list">${linksHTML(e.links, false)}</div>` : ''}
     <div class="sheet-foot"><span>${countWords(e.title + ' ' + e.body)} 字</span><span>${e.updatedAt ? '上次修改 ' + fmtEdited(e.updatedAt) : ''}</span></div>
-  </div>`;
-  box.hidden = false;
-  hydrate(box);
-  $('.reader', box).focus({ preventScroll: true });
-}
-function closeReader() {
-  const id = state.reading;
-  state.reading = null;
-  $('#editor').hidden = true;
-  $('#editor').innerHTML = '';
-  const card = id && document.querySelector(`.entry[data-id="${id}"]`);
-  if (card) card.focus({ preventScroll: true });
+  </article>`;
+  hydrate(tl);
 }
 
 /* ---------- 编辑器 ---------- */
@@ -649,7 +654,7 @@ function newEntry(date) {
 // fromReader：从阅读页点“编辑”进来的，完成后回到阅读页
 function openEditor(entry, isNew, fromReader = false) {
   closeMPanel();
-  state.reading = null;
+  if (!fromReader) state.reading = null;
   state.editing = { e: JSON.parse(JSON.stringify(entry)), isNew, fromReader, added: [], removed: [], addedMedia: [], removedMedia: [], hash: null, sug: [] };
   renderEditor();
   $('#editor').hidden = false;
@@ -888,9 +893,8 @@ async function saveEditor() {
     if (i >= 0) state.entries[i] = e; else state.entries.push(e);
   }
   closeEditor();
-  render();
-  if (ed.fromReader) openReader(e.id);
-  else if (ed.isNew) toast('已保存');
+  render();             // 从阅读页进来的，会回到这篇的阅读页
+  if (ed.isNew) toast('已保存');
 }
 function closeEditor() {
   const id = state.editing && state.editing.e.id;
@@ -947,6 +951,63 @@ async function deleteNotebook(id) {
   } catch (err) { toast('没能删除日记本，可能是网络断了'); await loadAll(); render(); return; }
   state.notebooks = state.notebooks.filter(n => n.id !== id);
   if (state.notebook === id) state.notebook = null;
+  render();
+}
+
+/* ---------- 标签：改名 / 删除（正文里的 #标签 一起改） ---------- */
+function tagDialog(tag) {
+  if (!tag) return;
+  const n = state.entries.filter(e => e.tags.includes(tag.id)).length;
+  const box = $('#confirm');
+  box.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="tg-msg">
+    <p id="tg-msg">标签 <span class="htag">#${esc(tag.name)}</span>，用在 ${n} 篇日记里。</p>
+    <label class="dialog-label" for="tg-name">改名（正文里的 #${esc(tag.name)} 会一起改）</label>
+    <input id="tg-name" class="dialog-input" value="${esc(tag.name)}" autocomplete="off">
+    <div class="row"><button type="button" class="text-btn danger" id="tg-del">删除这个标签</button><span class="grow"></span>
+      <button type="button" class="btn ghost" id="tg-no">取消</button><button type="button" class="btn" id="tg-save">改名</button></div></div>`;
+  box.hidden = false;
+  $('#tg-name').focus(); $('#tg-name').select();
+  const close = () => { box.hidden = true; box.innerHTML = ''; document.removeEventListener('keydown', onKey, true); };
+  const onKey = ev => {
+    if (ev.key === 'Escape') { ev.stopPropagation(); close(); }
+    if (ev.key === 'Enter' && ev.target.id === 'tg-name' && !ev.isComposing) { ev.preventDefault(); ev.stopPropagation(); $('#tg-save').click(); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  $('#tg-no').onclick = close;
+  box.onclick = ev => { if (ev.target === box) close(); };
+  $('#tg-save').onclick = async () => { const name = $('#tg-name').value; close(); await renameTag(tag, name); };
+  $('#tg-del').onclick = async () => { close(); await deleteTag(tag); };
+}
+async function renameTag(tag, input) {
+  const name = input.trim().replace(/^#/, '');
+  if (!name || name === tag.name) return;
+  if (!validTagName(name)) { toast('标签名里不能有空格或标点，也不能全是数字'); return; }
+  if (state.tags.some(x => x.id !== tag.id && x.name.toLowerCase() === name.toLowerCase())) { toast('已经有同名标签了'); return; }
+  const re = oneTagRE(tag.name);
+  const touched = state.entries.filter(e => e.tags.includes(tag.id)).map(e => ({ ...e, body: e.body.replace(re, (m, before) => before + '#' + name) }));
+  try {
+    await Store.put('tags', { ...tag, name });
+    await Store.putMany('entries', touched);
+  } catch (err) { toast('没能改名，可能是网络断了'); await loadAll(); render(); return; }
+  tag.name = name;
+  touched.forEach(e => { state.entries[state.entries.findIndex(x => x.id === e.id)] = e; });
+  render();
+  toast(`已改名为 #${name}`);
+}
+async function deleteTag(tag) {
+  if (!await askConfirm(`删除标签“${tag.name}”？日记会保留，正文里的“#${tag.name}”会变成普通文字“${tag.name}”。`, '删除标签')) return;
+  const re = oneTagRE(tag.name);
+  const touched = state.entries.filter(e => e.tags.includes(tag.id)).map(e => ({
+    ...e, tags: e.tags.filter(x => x !== tag.id),
+    body: e.body.replace(re, (m, before) => before + m.slice(before.length + 1)),
+  }));
+  try {
+    await Store.putMany('entries', touched);
+    await Store.del('tags', tag.id);
+  } catch (err) { toast('没能删除标签，可能是网络断了'); await loadAll(); render(); return; }
+  touched.forEach(e => { state.entries[state.entries.findIndex(x => x.id === e.id)] = e; });
+  state.tags = state.tags.filter(x => x.id !== tag.id);
+  state.tagSel = state.tagSel.filter(x => x !== tag.id);
   render();
 }
 
@@ -1132,7 +1193,7 @@ function closeMPanel() {
 window.matchMedia('(min-width: 761px)').addEventListener('change', closeMPanel);
 
 /* ---------- 事件 ---------- */
-function goJournal() { state.page = 'journal'; state.section = 'journal'; }
+function goJournal() { state.page = 'journal'; state.section = 'journal'; state.reading = null; }
 function shiftAnchor(days) { state.anchor = addDays(state.anchor, days); state.calMonth = state.anchor.slice(0, 7); render(); }
 const scrollTop = () => { $('#main').scrollTop = 0; window.scrollTo(0, 0); };
 
@@ -1144,14 +1205,14 @@ document.addEventListener('click', async ev => {
   if (t.matches('img[data-zoom]')) return showLightbox(t.src);
 
   // 阅读页
-  if (t.id === 'rd-close') return closeReader();
+  if (t.id === 'rd-back') return closeReader();
   if (t.id === 'rd-edit') { const e = state.entries.find(x => x.id === state.reading); if (e) openEditor(e, false, true); return; }
 
   // 板块 / 页面 / 手机面板
-  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; closeMPanel(); render(); scrollTop(); return; }
+  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
   if (t.matches('[data-mpanel]')) return openMPanel(t.dataset.mpanel);
-  if (t.matches('[data-page]')) { state.page = t.dataset.page; closeMPanel(); render(); scrollTop(); return; }
-  if (t.id === 'stats-summary') { state.page = 'stats'; render(); scrollTop(); return; }
+  if (t.matches('[data-page]')) { state.page = t.dataset.page; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
+  if (t.id === 'stats-summary') { state.page = 'stats'; state.reading = null; render(); scrollTop(); return; }
   if (t.matches('[data-year]')) { state.statsYear = t.dataset.year; renderMain(); return; }
 
   // 日历
@@ -1195,25 +1256,7 @@ document.addEventListener('click', async ev => {
   if (t.id === 'toggle-nb-edit') { state.editNotebooks = !state.editNotebooks; state.addingNotebook = false; renderSide(); return; }
   if (t.matches('[data-delnb]')) return deleteNotebook(t.dataset.delnb);
   if (t.id === 'toggle-tag-edit') { state.editTags = !state.editTags; renderSide(); return; }
-  if (t.matches('[data-deltag]')) {
-    const tag = tagById(t.dataset.deltag);
-    if (!await askConfirm(`删除标签“${tag.name}”？日记会保留，正文里的“#${tag.name}”会变成普通文字“${tag.name}”。`, '删除标签')) return;
-    const re = oneTagRE(tag.name);
-    const touched = state.entries.filter(e => e.tags.includes(tag.id)).map(e => ({
-      ...e, tags: e.tags.filter(x => x !== tag.id),
-      body: e.body.replace(re, (m, before) => before + m.slice(before.length + 1)),
-    }));
-    try {
-      await Store.putMany('entries', touched);
-      await Store.del('tags', tag.id);
-    } catch (err) { toast('没能删除标签，可能是网络断了'); await loadAll(); render(); return; }
-    touched.forEach(e => { state.entries[state.entries.findIndex(x => x.id === e.id)] = e; });
-    state.tags = state.tags.filter(x => x.id !== tag.id);
-    state.tagSel = state.tagSel.filter(x => x !== tag.id);
-    render();
-    return;
-  }
-
+  if (t.matches('[data-tagedit]')) return tagDialog(tagById(t.dataset.tagedit));
   // 备份 / 账户
   if (t.id === 'export-btn') { closeMPanel(); return exportData(); }
   if (t.id === 'import-btn') return $('#import-file').click();
@@ -1254,6 +1297,7 @@ document.addEventListener('click', async ev => {
     if (!await askConfirm('删除这篇日记？删除后无法恢复。', '删除')) return;
     try { await deleteEntry(ed.e.id); } catch (err) { toast('没能删除，可能是网络断了，请稍后再试。', 5000); return; }
     state.editing = null;
+    state.reading = null;
     $('#editor').hidden = true;
     render();
     toast('已删除');
@@ -1283,7 +1327,7 @@ document.addEventListener('click', async ev => {
 $('#editor').addEventListener('mousedown', ev => {
   if (ev.target.closest('#ed-tagsug')) { ev.preventDefault(); return; }   // 点标签提示时不让正文失去焦点
   if (ev.target.id !== 'editor') return;
-  if (state.editing) saveEditor(); else if (state.reading) closeReader();
+  if (state.editing) saveEditor();
 });
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 
@@ -1303,23 +1347,6 @@ document.addEventListener('change', async ev => {
   if (t.id === 'ed-file' && t.files.length) { const files = [...t.files]; t.value = ''; await addPhotos(files); }
   if (t.id === 'ed-audio-file' && t.files.length) { const files = [...t.files]; t.value = ''; await addAudios(files); }
   if (t.id === 'import-file' && t.files[0]) { closeMPanel(); await importData(t.files[0]); t.value = ''; }
-  if (t.matches('[data-rename]')) {
-    const tag = tagById(t.dataset.rename);
-    const name = t.value.trim().replace(/^#/, '');
-    if (!name || name === tag.name) { t.value = tag.name; return; }
-    if (!validTagName(name)) { toast('标签名里不能有空格或标点，也不能全是数字'); t.value = tag.name; return; }
-    if (state.tags.some(x => x.id !== tag.id && x.name.toLowerCase() === name.toLowerCase())) { toast('已经有同名标签了'); t.value = tag.name; return; }
-    // 正文里的 #旧名 一起改成 #新名
-    const re = oneTagRE(tag.name);
-    const touched = state.entries.filter(e => e.tags.includes(tag.id)).map(e => ({ ...e, body: e.body.replace(re, (m, before) => before + '#' + name) }));
-    try {
-      await Store.put('tags', { ...tag, name });
-      await Store.putMany('entries', touched);
-    } catch (err) { toast('没能改名，可能是网络断了'); await loadAll(); render(); return; }
-    tag.name = name;
-    touched.forEach(e => { state.entries[state.entries.findIndex(x => x.id === e.id)] = e; });
-    renderMain();
-  }
   if (t.matches('[data-nbrename]')) {
     const nb = nbById(t.dataset.nbrename);
     const name = t.value.trim();
@@ -1358,10 +1385,6 @@ document.addEventListener('keydown', ev => {
     if ((ev.target.id === 'add-photo' || ev.target.id === 'add-audio') && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); ev.target.click(); }
     return;
   }
-  if (state.reading) {
-    if (ev.key === 'Escape') { ev.preventDefault(); closeReader(); }
-    return;
-  }
   if (ev.key === 'Escape' && state.mpanel) { closeMPanel(); return; }
   if (mod && ev.key.toLowerCase() === 'k') { ev.preventDefault(); if (window.matchMedia('(max-width: 760px)').matches) openMPanel('search'); else $('#search').focus(); return; }
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
@@ -1370,6 +1393,11 @@ document.addEventListener('keydown', ev => {
     return;
   }
   if (state.section !== 'journal') return;
+  if (state.reading && state.page === 'journal') {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeReader(); }
+    else if (!mod && ev.key.toLowerCase() === 'e') { ev.preventDefault(); $('#rd-edit').click(); }
+    return;
+  }
   if (!mod && ev.key.toLowerCase() === 'n') { ev.preventDefault(); $('#new-btn').click(); return; }
   if (state.page === 'journal' && state.view !== 'timeline' && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) { ev.preventDefault(); shiftAnchor(ev.key === 'ArrowLeft' ? -1 : 1); return; }
   if (ev.key === 'Enter' && document.activeElement.classList.contains('entry')) document.activeElement.click();

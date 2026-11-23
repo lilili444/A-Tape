@@ -55,7 +55,8 @@
 - 视觉只用 `:root` 里的变量（`--paper --sheet --ink --ink-soft --rule --accent --danger`、`--font-display --font-body`），不要硬写新颜色。
 - 电脑侧栏的“视图 / 日记本 / 标签”可以点名字收起（`data-collapse`，存在 localStorage）；手机面板里始终展开。
 - 手机版：顶部 6 个按钮（视图 / 日记本 / 标签 / 搜索 / 统计 / 备份），点开才展开面板；面板里显示的是侧栏的同一块 DOM（`openMPanel` 把它搬过去，关闭时 `restoreSide` 搬回来），所以电脑和手机共用一套功能代码。
-- 点日记先打开阅读页（`openReader`），点“编辑”才进编辑页（`openEditor(e, false, true)`），完成后回到阅读页。阅读页和编辑页共用 `#editor` 这一层。
+- 点日记先打开阅读页（`openReader`，显示在右栏主区，`state.reading` 记着是哪篇；“← 返回”回到列表原位置），点“编辑”才进编辑页（`openEditor(e, false, true)`，浮在上面的 `#editor` 层），完成后回到阅读页。
+- 侧栏标签的编辑模式不换成输入框：点标签弹出 `tagDialog`（改名 / 删除）。
 - **版本号和缓存**：版本号是 `v大.功能.修补`（规则见 `docs/开发记录.md`）。GitHub Pages 让浏览器缓存 10 分钟，所以**改了 `style.css`、`app.js` 或 `config.js`，就要升版本号：改 `app.js` 的 `APP_VERSION`，并把 `index.html` 里三处 `?v=` 改成同一个版本号**，否则会出现新页面配旧程序、页面全乱的情况（2026-11-22 发生过）。然后在开发记录里补一条这个版本改了什么。
 
 ## 安全
