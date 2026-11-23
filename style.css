@@ -43,8 +43,8 @@ button { cursor: pointer; }
 }
 .mbar, .mpanel, .mscrim, .fab { display: none; }
 .mbar[hidden], .fab[hidden] { display: none !important; }
-.side.days-mode .sec:not(#sec-backup):not(#sec-dviews) { display: none; }
-.side:not(.days-mode) #sec-dviews { display: none; }
+.side.days-mode .sec:not(#sec-backup):not(#sec-dviews):not(#sec-dcal) { display: none; }
+.side:not(.days-mode) #sec-dviews, .side:not(.days-mode) #sec-dcal { display: none; }
 
 /* 板块切换：手记 / 纪念日 */
 .sections { display: flex; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 8px; }
@@ -410,14 +410,14 @@ button { cursor: pointer; }
 .chips button:hover { color: var(--ink); }
 .chips button[aria-pressed="true"] { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--ink); }
 .ann {
-  width: 100%; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 8px 12px; align-items: center;
+  width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center;
   border: 0; border-bottom: 1px solid var(--rule); background: none; padding: 16px 0 14px; text-align: left; position: relative;
 }
 .ann:last-child { border-bottom: 0; }
 .ann-title { font-size: 17px; font-weight: 600; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ann-num { white-space: nowrap; }
 .ann-num .big-num { font-size: 40px; }
-.ann .dots { grid-column: 2 / -1; }
+.ann .dots { grid-column: 1 / -1; }
 .ann .dots i { height: 4px; }
 .ann[aria-current="true"] .ann-title { color: var(--accent); }
 .ann[aria-current="true"]::before { content: ""; position: absolute; left: -14px; top: 26px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
@@ -455,22 +455,19 @@ button { cursor: pointer; }
 /* 人生 */
 .life { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 0 64px; margin-top: 10px; }
 .life-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding-top: 16px; }
-.life-big { margin: 0; font-size: 22px; font-weight: 600; }
-.life-big .big-num { font-size: 40px; font-weight: 400; margin: 0 2px; }
-.life-path { margin: 22px 0 8px; }
-.life-path svg { width: 100%; height: auto; display: block; overflow: visible; }
-.lp-seg { stroke: var(--rule); stroke-width: 7; stroke-linecap: round; }
-.lp-seg.past { stroke: var(--accent); }
-.lp-turn { fill: none; stroke: var(--rule); stroke-width: 7; stroke-linecap: round; stroke-dasharray: 14 12; stroke-dashoffset: -6; }
-.lp-turn.past { stroke: var(--accent); }
-.lp-hit { stroke: transparent; stroke-width: 28; }
-.lp-year { cursor: pointer; }
-.lp-year:hover .lp-seg { stroke-width: 10; }
-.lp-year.sel .lp-seg { stroke-width: 11; }
-.lp-label { fill: var(--ink-soft); font-family: var(--font-display); font-size: 13px; }
-.lp-now { fill: var(--ink); stroke: var(--paper); stroke-width: 3; }
-.lp-ev { font-size: 15px; }
-.lp-evdot { fill: var(--ink); }
+.life-pct { margin: 0; }
+.life-pct .big-num { font-size: 64px; }
+/* 人生点阵：每个点是一个月，一行两年 */
+.life-dots { display: grid; grid-template-columns: repeat(24, 1fr); grid-auto-rows: 15px; place-items: center; margin: 22px 0 10px; }
+.ld { width: 7px; height: 7px; border-radius: 50%; background: var(--rule); cursor: pointer; }
+.ld.past { background: var(--ink); }
+.ld.now { background: var(--accent); box-shadow: 0 0 0 3px var(--paper), 0 0 0 4px var(--accent); }
+.ld.mark { background: var(--accent); }
+.ld.sel:not(.ev) { transform: scale(1.4); }
+.ld.ev { width: auto; height: auto; background: none; font-size: 13px; line-height: 1; }
+.ld.ev.sel { transform: scale(1.2); }
+.ld:hover { transform: scale(1.6); }
+.life-foot { font-family: var(--font-display); font-size: 13px; color: var(--ink-soft); }
 .life-year { margin-top: 26px; padding: 18px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
 .life-year h3 { margin: 0; font-size: 20px; }
 .life-nav { display: flex; gap: 2px; }
@@ -482,6 +479,51 @@ button { cursor: pointer; }
 .fp-line { border-left: 1px solid var(--rule); margin-left: 6px; padding-left: 18px; }
 .fp-year { font-family: var(--font-display); font-size: 22px; font-variant-numeric: lining-nums; margin: 18px 0 2px; }
 .fp-year:first-child { margin-top: 0; }
+
+/* 时间轴：“已经”的日子排成一条竖线 */
+.tl { list-style: none; margin: 8px 0 0 6px; padding: 0 0 0 18px; border-left: 1px solid var(--rule); }
+.tl-year { font-family: var(--font-display); font-size: 22px; font-variant-numeric: lining-nums; margin: 18px 0 2px; }
+.tl-year:first-child { margin-top: 4px; }
+.tl-item { position: relative; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 0; background: none; padding: 10px 0; text-align: left; }
+.tl-item::before { content: ""; position: absolute; left: -22px; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: var(--ink-soft); }
+.tl-item .ann-title { font-size: 17px; }
+.tl-item .ann-num .big-num { font-size: 30px; }
+.tl-item:hover .ann-title, .tl-item[aria-current="true"] .ann-title { color: var(--accent); }
+.tl-item[aria-current="true"]::before { background: var(--accent); }
+.ann .ann-title { font-size: 17px; }
+.ann .ann-num .big-num { font-size: 36px; }
+.d-switch { margin: 8px 0 0 -8px; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 4px; }
+
+/* 日历：有日子的那天显示 emoji */
+.ecal-wrap { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 0 64px; margin-top: 8px; align-items: start; }
+.ec-head { display: flex; justify-content: space-between; margin: 0 -8px 8px; }
+.ec-grid { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 6px; text-align: center; }
+.ec-wd { font-size: 12px; color: var(--ink-soft); padding-bottom: 6px; }
+.ec-day { position: relative; border: 0; background: none; padding: 6px 0 4px; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 2px; border-radius: 6px; }
+.ec-day:hover .ec-num { color: var(--accent); }
+.ec-num, .ec-emoji { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; }
+.ec-num { font-family: var(--font-display); font-size: 24px; line-height: 34px; font-variant-numeric: lining-nums tabular-nums; }
+.ec-emoji { font-size: 26px; line-height: 34px; }
+.ec-day.today .ec-num { color: var(--accent); font-weight: 600; }
+.ec-day.has::after { content: ""; position: absolute; bottom: 0; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--accent); }
+.ec-day.sel .ec-num, .ec-day.sel .ec-emoji { outline: 1px solid var(--ink); outline-offset: -1px; }   /* 和手记小日历一样：选中的那天画一个圈 */
+.ec-more { position: absolute; top: 6px; right: 18%; width: 5px; height: 5px; border-radius: 50%; background: var(--ink-soft); }
+.ec-side { padding-top: 40px; }
+.ec-links { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 14px; }
+/* 小日历里的 emoji（手记侧栏、时间轴侧栏） */
+.cal-day.emo { font-size: 14px; }
+.cal-day.more::before { content: ""; position: absolute; top: 1px; right: 1px; width: 4px; height: 4px; border-radius: 50%; background: var(--ink-soft); }
+#days-cal .cal-day:not([data-dgo]) { cursor: default; }
+#days-cal .cal-day:not([data-dgo]):hover { color: var(--ink); }
+
+/* 时间刻度 */
+.tscale .ts-h { margin: 14px 0 8px; font-size: 13px; color: var(--ink-soft); }
+.ts-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 12px; text-align: center; }
+.ts-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+.ts-cell > .big-num { font-size: 30px; }
+.ts-pct .big-num { font-size: 44px; }
+.ts-pct small { margin-left: 2px; }
+.cal-emoji-toggle { margin-top: 6px; font-size: 12px; }
 
 /* 新建 / 编辑一个日子 */
 .ann-form { width: min(460px, 100%); max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px); overflow-y: auto; }
@@ -495,6 +537,11 @@ button { cursor: pointer; }
 .af-picks button:hover { background: var(--paper); }
 .af-check { display: flex; gap: 8px; align-items: center; font-size: 14px; margin: -8px 0 14px; cursor: pointer; }
 .af-check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+.af-seg { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 4px 0 16px; font-size: 14px; }
+.af-seg label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.af-seg input { accent-color: var(--accent); margin: 0; }
+.af-sub { margin: -6px 0 0 24px; }
+.af-sub[hidden] { display: none; }
 .af-note { resize: vertical; min-height: 54px; font-size: 15px; line-height: 1.6; }
 
 /* ---------- 手机 ---------- */
@@ -557,8 +604,16 @@ button { cursor: pointer; }
   .toast { bottom: 84px; }
 
   /* 纪念日 */
-  .dbar { grid-template-columns: repeat(4, 1fr); }
-  .today, .life, .d-split { grid-template-columns: 1fr; gap: 0; }
+  .dbar { grid-template-columns: repeat(5, 1fr); }
+  .today, .life, .d-split, .ecal-wrap { grid-template-columns: 1fr; gap: 0; }
+  .ec-side { padding-top: 18px; }
+  .ts-cell > .big-num { font-size: 24px; }
+  .ts-pct .big-num { font-size: 36px; }
+  .ec-num { font-size: 20px; }
+  .ec-emoji { font-size: 22px; }
+  .life-dots { grid-auto-rows: 13px; }
+  .ld { width: 6px; height: 6px; }
+  .ld.ev { font-size: 11px; }
   .td-date .big-num { font-size: 60px; }
   .td-next .big-num { font-size: 60px; }
   .ledger-big .big-num { font-size: 52px; }
@@ -568,8 +623,6 @@ button { cursor: pointer; }
   .d-grid { gap: 4px; }
   .d-big .big-num { font-size: 88px; }
   .ann-num .big-num { font-size: 34px; }
-  .lp-label { font-size: 22px; }          /* 线在手机上被缩小了，字要放大才看得清 */
-  .lp-ev { font-size: 24px; }
   .ann-form { max-height: none; height: 100%; padding: 20px 18px calc(22px + env(safe-area-inset-bottom)); }
 }
 @media (max-width: 340px) {

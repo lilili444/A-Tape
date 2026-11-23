@@ -1,6 +1,6 @@
 # CLAUDE.md · 给 Claude 的项目说明
 
-这是 Lili 自己用的个人管理网页，项目名叫**一卷磁带**（包含“手记”和“纪念日”两个板块；GitHub 仓库叫 `lilili444/A-Tape`，原名 MyJournal）。每次开始工作前先读完这份说明。
+这是 Lili 自己用的个人管理网页，项目名叫**一卷磁带**（包含“手记”和“时间轴”两个板块；“时间轴”就是纪念日 / 倒数日；GitHub 仓库叫 `lilili444/A-Tape`，原名 MyJournal）。每次开始工作前先读完这份说明。
 想知道某个设计“为什么这样做”（选型、版本历史、踩过的坑），读 `docs/开发记录.md`；做了重要决定后在那里补一条。
 
 ## 和 Lili 合作的方式
@@ -12,7 +12,7 @@
 
 ## 项目是什么
 
-- 两个板块：**手记**（日记，已上线）和 **纪念日 / 倒数日**（筹备中）。两个板块的数据放在一起，界面分开设计。
+- 两个板块：**手记**（日记）和 **时间轴**（纪念日 / 倒数日，v0.6 起，代码里叫 `section: 'days'`，页面 `dview`：today 今日 / list 时间轴 / life 人生 / cal 日历）。日历在电脑上是侧栏里的小日历（`renderDaysSideCal`），只有手机才是单独一页（`renderDCal`）。时间轴页不显示 emoji。两个板块的数据放在一起，界面分开设计。
 - 纯静态网页，部署在 GitHub Pages：<https://lilili444.github.io/A-Tape/>（main 分支根目录，推送后 1～3 分钟生效）。
 - 后端是 Supabase 免费版（项目网址写在 `config.js` 里）。
 
@@ -32,7 +32,7 @@
 
 ## 数据
 
-- Supabase `records` 表：`(user_id, store, id, data jsonb, updated_at)`，主键 `(user_id, store, id)`。`store` 取值：`entries` / `tags` / `notebooks` / `meta` / `anniversaries`（纪念日预留）。RLS 只允许本人；`authenticated` 角色有表权限（新项目不会自动授权，已写进 schema.sql）。
+- Supabase `records` 表：`(user_id, store, id, data jsonb, updated_at)`，主键 `(user_id, store, id)`。`store` 取值：`entries` / `tags` / `notebooks` / `meta` / `anniversaries`（时间轴上的日子）。RLS 只允许本人；`authenticated` 角色有表权限（新项目不会自动授权，已写进 schema.sql）。
 - 存储桶：`photos`（`用户ID/照片ID.jpg`，只收 JPEG，≤5MB）、`media`（录音，`用户ID/文件ID`，≤50MB）。
 - 日记（entry）结构：
   ```js
@@ -44,7 +44,14 @@
 - **标签以正文为准**（v0.5 起）：正文里的 `#标签` 在保存时由 `tagsInText()` 识别，再由 `ensureTags()` 换成 `tags: [tagId]`。不要再做单独的标签输入。`loadAll()` 里的 `syncTags()` 负责旧数据迁移和保持一致。改名、删除标签要同时改正文（`oneTagRE`）。
   `source: 'apple-journal'` 的 319 篇是从苹果手记导入的（2026-11-22），只有日期没有时间，所以同一天从 12:00 起每篇加一分钟。
 - 日记本：`{ id, name, order, createdAt }`；标签：`{ id, name, createdAt }`。
-- 备份文件格式（导出 / 导入）：`{ app: 'paper-journal', version: 3, notebooks, tags, entries, photos: [{id, data}], media: [{id, mime, data}] }`。`app` 的值不要改，否则旧备份导不进去。
+- 时间轴上的日子（anniversary）：
+  ```js
+  { id, title, date: 'YYYY-MM-DD', emoji, group /* 分类 */, repeat: 'none' | 'yearly',
+    countMode: 'next' | 'since' /* 每年重复的：显示离下一次还是已经多少天 */,
+    life /* 人生足迹 */, note, createdAt, updatedAt, size? /* v0.7 试过又取消的大小，不读也不删 */ }
+  ```
+  出生日期存在 meta：`{ key: 'life', birth, lifespan }`，生日由它自动生成（`birthdayItem()`，不存数据库）。天数当天算 0。
+- 备份文件格式（导出 / 导入）：`{ app: 'paper-journal', version: 4, notebooks, tags, entries, photos: [{id, data}], media: [{id, mime, data}], anniversaries, meta }`（v3 的旧备份没有最后两项，照常能导入）。`app` 的值不要改，否则旧备份导不进去。
 - 照片一律压缩到长边 1600px、JPEG 质量 0.82（Lili 确认过的标准）。
 - **加新字段**：直接在 JSON 里加，在 `loadAll()` 里给旧数据补默认值即可，不用改表。
 
@@ -74,6 +81,7 @@
 
 ## 待办
 
-- [ ] 纪念日 / 倒数日板块（数据用 `store: 'anniversaries'`；提醒可以考虑导出到苹果日历；手机端需要加板块切换）
+- [x] 时间轴板块（v0.6 / v0.7）
+- [ ] 时间轴：照片背景（参考第一款 app）、农历、提醒（可以考虑导出到苹果日历）、搜索；导入旧倒数日 app 的数据（截图识别）
 - [ ] 每周用 GitHub Actions 自动备份到另一个**私有**仓库（Secret key 只能放在 GitHub Secrets）
 - [x] 项目名：一卷磁带（`<title>`、登录页 `<h1>`、备份文件名“一卷磁带备份-日期.json”）
