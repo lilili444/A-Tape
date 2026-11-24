@@ -67,6 +67,17 @@
 - 侧栏标签的编辑模式不换成输入框：点标签弹出 `tagDialog`（改名 / 删除）。
 - **版本号和缓存**：版本号是 `v大.功能.修补`（规则见 `docs/开发记录.md`）。GitHub Pages 让浏览器缓存 10 分钟，所以**改了 `style.css`、`app.js` 或 `config.js`，就要升版本号：改 `app.js` 的 `APP_VERSION`，并把 `index.html` 里三处 `?v=` 改成同一个版本号**，否则会出现新页面配旧程序、页面全乱的情况（2026-11-22 发生过）。然后在开发记录里补一条这个版本改了什么。
 
+## 自动备份（私人仓库 `lilili444/A-Tape-backup`）
+
+- 每周一、周四 UTC 3:23，GitHub Actions 用 Supabase **Secret key**（只存在那个仓库的 Actions Secrets，名字 `SUPABASE_SECRET_KEY`）只读地备份：`records` 整张表 → `data/records.json`，`photos` / `media` 两个桶 → `files/photos/`、`files/media/`（只下载新增的，不删旧的）。
+- 恢复：那个仓库的 Actions → “制作恢复文件”，生成和网站“导出备份”同格式的 `.json`，在网站“导入备份”。
+- 程序在那个仓库的 `scripts/backup.mjs`（备份）和 `scripts/make-import.mjs`（恢复文件）。
+- **网站更新时，大多数情况不用动备份**：日记加新字段、新的 `store` 种类，都会被整表备份进去。**以下情况要同步改备份仓库**，并在给 Lili 的说明里提一句：
+  - 新增或改名**存储桶**（现在是 `photos`、`media`）→ 改 `backup.mjs` 最后的 `mirror(...)`，以及 `make-import.mjs`
+  - 改了**备份文件格式**（`exportData()` / `importData()` 的字段、`version`），或者新增的 `store` 需要能导回网站 → 改 `make-import.mjs`，让它生成的文件和 `exportData()` 一致
+  - 改了表名、Supabase 项目网址 → 改 `backup.mjs` 和 `.github/workflows/backup.yml` 里的 `SUPABASE_URL`
+  - 新建表或换了数据库 → `schema.sql` 里要给 `service_role` 加 `grant select`，否则备份会报 `permission denied`
+
 ## 安全
 
 - 永远不要把 Supabase **Secret key（`sb_secret_…`）/ service_role key / 数据库密码** 写进仓库，也不要让 Lili 发出来。Publishable key 可以公开。
@@ -83,5 +94,5 @@
 
 - [x] 时间轴板块（v0.6 / v0.7）
 - [ ] 时间轴：照片背景（参考第一款 app）、农历、提醒（可以考虑导出到苹果日历）、搜索；导入旧倒数日 app 的数据（截图识别）
-- [ ] 每周用 GitHub Actions 自动备份到另一个**私有**仓库（Secret key 只能放在 GitHub Secrets）
+- [x] 每周用 GitHub Actions 自动备份到私人仓库 `A-Tape-backup`（见上面“自动备份”）
 - [x] 项目名：一卷磁带（`<title>`、登录页 `<h1>`、备份文件名“一卷磁带备份-日期.json”）

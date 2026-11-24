@@ -43,6 +43,11 @@ create policy "records_delete_own" on public.records
 grant usage on schema public to authenticated;
 grant select, insert, update, delete on table public.records to authenticated;
 
+-- 自动备份（私人仓库 A-Tape-backup 的 GitHub Actions）用 Secret key 读数据，身份是 service_role。
+-- 只给“读”的权限就够了；少了这两行，备份会报 “permission denied for table records”
+grant usage on schema public to service_role;
+grant select on table public.records to service_role;
+
 -- 没登录的访客什么都碰不到
 revoke all on public.records from anon;
 
