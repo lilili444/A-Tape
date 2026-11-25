@@ -84,7 +84,7 @@ const todayKey = () => dayKey(new Date());
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 // 版本号：和 index.html 里三处 ?v= 保持一致。规则见 docs/开发记录.md
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.8.0';
 const VIEWS = [
   { id: 'timeline', label: '时间线' },
   { id: 'y3', label: '三年日记', years: 3, name: '三年' },
@@ -136,7 +136,7 @@ function tagsInText(text) {
   return out;
 }
 // 显示正文：转义，并把 #标签 包起来上色
-function richText(text) {
+function tagText(text) {
   let out = '', last = 0;
   for (const m of (text || '').matchAll(TAG_FIND)) {
     if (isNumberTag(m[2])) continue;
@@ -146,6 +146,31 @@ function richText(text) {
   }
   return out + esc((text || '').slice(last));
 }
+/* 正文格式：正文里存的仍是纯文字，用符号标记（v0.8 起），显示时才变成格式。
+     **粗体**   *斜体*   ++下划线++   ~~删除线~~   一行开头写 “> ” 是引用（灰色）
+   符号必须成对、在同一行里，里面的文字两头不能是空格；不成对的符号照原样显示。 */
+const FMT = [
+  { mark: '**', tag: 'strong', re: /\*\*(?=\S)(.+?)(?<=\S)\*\*/g },
+  { mark: '~~', tag: 's', re: /~~(?=\S)(.+?)(?<=\S)~~/g },
+  { mark: '++', tag: 'u', re: /\+\+(?=\S)(.+?)(?<=\S)\+\+/g },
+  { mark: '*', tag: 'em', re: /(?<![*\w])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![*\w])/g },
+];
+const QUOTE_RE = /^>\s?/;
+const inlineFmt = html => FMT.reduce((h, f) => h.replace(f.re, `<${f.tag}>$1</${f.tag}>`), html);
+// block：阅读页里引用单独成块；列表预览里只变灰
+function richText(text, block = false) {
+  const lines = (text || '').split('\n');
+  return lines.map((line, i) => {
+    const last = i === lines.length - 1;
+    if (QUOTE_RE.test(line)) {
+      const inner = inlineFmt(tagText(line.replace(QUOTE_RE, '')));
+      return block ? `<span class="quote">${inner || ' '}</span>` : `<span class="quote-inline">${inner}</span>${last ? '' : '\n'}`;
+    }
+    return inlineFmt(tagText(line)) + (last ? '' : '\n');
+  }).join('');
+}
+// 去掉格式符号的纯文字（用在标题提示、字数之外的地方）
+const plainText = text => (text || '').split('\n').map(l => l.replace(QUOTE_RE, '')).join('\n').replace(/\*\*|~~|\+\+/g, '');
 
 /* 只存在这台设备浏览器里的小偏好（比如侧栏收起了哪几块）。读不到也没关系 */
 function readPref(key, fallback) {
@@ -173,9 +198,10 @@ const state = {
   mpanel: null,
   urls: new Map(),
   // 纪念日板块
+  prefs: { key: 'prefs' },     // 跟着账号走的设置（存在 meta）：默认日记本、标签分组、时间轴分类顺序
   days: [], life: { key: 'life', birth: '', lifespan: 88 },
   dview: 'today',              // today | list | life
-  dgroup: '',                  // 倒数里只看某个分类
+  dgroups: [],                 // 时间轴只看这些分类（可以多选，空 = 全部）
   dsel: null,                  // 选中的日子（电脑上显示在右边）
   dopen: false,                // 手机上是否打开了详情页
   dAllMarks: false,            // 时间节点显示全部
@@ -195,11 +221,125 @@ function tagCounts() {
 }
 const nbById = id => state.notebooks.find(n => n.id === id);
 const sortedNotebooks = () => [...state.notebooks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || (a.createdAt || '').localeCompare(b.createdAt || ''));
-// 新日记默认放进“最近一篇日记所在的日记本”
+// 新日记默认放进“设为默认”的日记本；没设就放进最近一篇日记所在的日记本
 function defaultNotebookId() {
+  if (nbById(state.prefs.defaultNotebook)) return state.prefs.defaultNotebook;
   const newest = [...state.entries].sort((a, b) => b.date.localeCompare(a.date))[0];
   if (newest && nbById(newest.notebookId)) return newest.notebookId;
   return (sortedNotebooks()[0] || {}).id;
+}
+
+/* 标签：手动排序 + 分组。分组列表存在 prefs.tagGroups：[{ id, name }]（顺序就是显示顺序），
+   标签自己记着 groupId 和 order。没排过序的标签排在后面，按篇数多少。 */
+const tagGroups = () => state.prefs.tagGroups || [];
+function sortedTags() {
+  const counts = tagCounts();
+  const o = t => typeof t.order === 'number' ? t.order : Infinity;
+  return [...state.tags].sort((a, b) => o(a) - o(b) || (counts.get(b.id) || 0) - (counts.get(a.id) || 0) || a.name.localeCompare(b.name, 'zh'));
+}
+const groupOfTag = t => tagGroups().some(g => g.id === t.groupId) ? t.groupId : '';
+async function savePrefs(patch) {
+  const next = { ...state.prefs, ...patch };
+  await Store.put('meta', next);
+  state.prefs = next;
+}
+
+/* ---------- 拖动排序（电脑用鼠标拖，手机长按后拖） ----------
+   可以拖的东西：data-sort-kind="种类" data-sort-id="id"；放的地方：data-sort-zone="种类" data-zone-id="…"。
+   带 .drag-handle 的把手按下就能拖。松手后把每个区域里的新顺序交给 onSortDone(种类, { 区域id: [id…] })。 */
+const drag = { el: null, kind: '', timer: 0, x: 0, y: 0, moved: false, pid: null, justDropped: false };
+function dragStart() {
+  drag.el.classList.add('dragging');
+  document.body.classList.add('is-dragging');
+  if (navigator.vibrate) try { navigator.vibrate(10); } catch (e) { /* 不支持就算了 */ }
+}
+document.addEventListener('pointerdown', ev => {
+  if (ev.button > 0) return;
+  const el = ev.target.closest('[data-sort-id]');
+  if (!el || (ev.target.closest('input, textarea, select') && !ev.target.closest('.drag-handle'))) return;
+  Object.assign(drag, { el, kind: el.dataset.sortKind, x: ev.clientX, y: ev.clientY, moved: false, pid: ev.pointerId, started: false });
+  const handle = !!ev.target.closest('.drag-handle');
+  if (ev.pointerType === 'touch' && !handle) {
+    drag.timer = setTimeout(() => { drag.started = true; dragStart(); }, 380);   // 手机：长按才开始拖，不影响滑动
+  } else drag.immediate = true;
+  drag.handle = handle;
+});
+document.addEventListener('pointermove', ev => {
+  if (!drag.el || ev.pointerId !== drag.pid) return;
+  const dist = Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y);
+  if (!drag.started) {
+    if (ev.pointerType === 'touch' && !drag.handle) { if (dist > 8) { clearTimeout(drag.timer); drag.el = null; } return; }
+    if (dist < 5) return;
+    drag.started = true; dragStart();
+  }
+  ev.preventDefault();
+  const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+  if (!hit) return;
+  const over = hit.closest(`[data-sort-kind="${drag.kind}"]`);
+  if (over && over !== drag.el && !over.contains(drag.el) && !drag.el.contains(over)) {
+    const r = over.getBoundingClientRect();
+    const zone = over.parentElement;
+    const horizontal = getComputedStyle(zone).flexDirection === 'row';
+    const after = horizontal ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
+    zone.insertBefore(drag.el, after ? over.nextSibling : over);
+    drag.moved = true;
+    return;
+  }
+  const zone = hit.closest(`[data-sort-zone="${drag.kind}"]`);
+  if (zone && !zone.contains(drag.el) && !drag.el.contains(zone)) {
+    const tail = zone.querySelector(':scope > .sort-tail');
+    zone.insertBefore(drag.el, tail);
+    drag.moved = true;
+  }
+}, { passive: false });
+// 手机：开始拖之后不让页面跟着滑
+document.addEventListener('touchmove', ev => { if (drag.el && drag.started) ev.preventDefault(); }, { passive: false });
+function dragEnd(ev) {
+  if (!drag.el || (ev && ev.pointerId !== drag.pid)) return;
+  clearTimeout(drag.timer);
+  const { el, kind, started, moved } = drag;
+  drag.el = null;
+  el.classList.remove('dragging');
+  document.body.classList.remove('is-dragging');
+  if (!started) return;
+  drag.justDropped = true;                 // 拖完松手不算“点一下”
+  setTimeout(() => { drag.justDropped = false; }, 0);
+  if (!moved) return;
+  const zones = {};
+  document.querySelectorAll(`[data-sort-zone="${kind}"]`).forEach(z => {
+    zones[z.dataset.zoneId || ''] = [...z.querySelectorAll(`:scope > [data-sort-kind="${kind}"]`)].map(x => x.dataset.sortId);
+  });
+  onSortDone(kind, zones);
+}
+document.addEventListener('pointerup', dragEnd);
+document.addEventListener('pointercancel', dragEnd);
+document.addEventListener('click', ev => { if (drag.justDropped) { ev.stopPropagation(); ev.preventDefault(); } }, true);
+document.addEventListener('contextmenu', ev => { if (drag.el) ev.preventDefault(); });
+
+async function onSortDone(kind, zones) {
+  try {
+    if (kind === 'nb') {
+      const ids = zones[''] || [];
+      const changed = ids.map((id, i) => ({ ...nbById(id), order: i })).filter(n => n.id);
+      await Store.putMany('notebooks', changed);
+      changed.forEach(n => Object.assign(nbById(n.id), n));
+    } else if (kind === 'tag') {
+      const changed = [];
+      let i = 0;
+      for (const [gid, ids] of Object.entries(zones)) for (const id of ids) {
+        const t = tagById(id);
+        if (t) changed.push({ ...t, groupId: gid, order: i++ });
+      }
+      await Store.putMany('tags', changed);
+      changed.forEach(t => Object.assign(tagById(t.id), t));
+    } else if (kind === 'tgroup') {
+      const ids = zones[''] || [];
+      await savePrefs({ tagGroups: ids.map(id => tagGroups().find(g => g.id === id)).filter(Boolean) });
+    } else if (kind === 'dgroup') {
+      await savePrefs({ dayGroupOrder: zones[''] || [] });
+    }
+  } catch (err) { toast('没能保存新的顺序，可能是网络断了'); }
+  render();
 }
 
 /* 照片、录音的临时链接（缓存 20 小时） */
@@ -315,7 +455,7 @@ function renderCalendar() {
     const k = `${y}-${pad(m)}-${pad(d)}`;
     const cls = ['cal-day', has.has(k) && 'has', k === today && 'today', k === sel && 'sel', k > today && 'dim'].filter(Boolean).join(' ');
     const ev = (emo.get(k) || []).find(a => a.emoji);
-    cells += `<button type="button" class="${cls}${ev ? ' emo' : ''}" data-day="${k}" aria-label="${m}月${d}日${has.has(k) ? '，有日记' : ''}${ev ? '，' + esc(ev.title) : ''}"${ev ? ` title="${esc(ev.title)}"` : ''}>${ev ? esc(ev.emoji) : d}</button>`;
+    cells += `<button type="button" class="${cls}${ev ? ' emo' : ''}" data-day="${k}" aria-label="${m}月${d}日${has.has(k) ? '，有日记' : ''}${ev ? '，' + esc(annName(ev)) : ''}"${ev ? ` title="${esc(annName(ev))}"` : ''}>${ev ? esc(ev.emoji) : d}</button>`;
   }
   $('#mini-cal').innerHTML = `<div class="cal-head"><button type="button" data-cal="-1" aria-label="上个月">‹</button><span>${y} · ${MONTH_CN[m - 1]}</span><button type="button" data-cal="1" aria-label="下个月">›</button></div><div class="cal-grid">${cells}</div><button type="button" class="link-btn cal-emoji-toggle" id="cal-emoji">${state.calEmoji ? '隐藏' : '显示'}时间轴 emoji</button>`;
 }
@@ -333,7 +473,7 @@ function renderSide() {
     b.title = shut ? '展开' : '收起';
   });
 
-  const nDays = allDays().length;
+  const nDays = allDays().filter(a => a.date <= todayKey()).length;   // 和时间轴列表一致：只数已经过去的
   $('#dview-list').innerHTML = DVIEWS.filter(v => v.id !== 'cal').map(v =>   // 电脑上日历直接放在侧栏，不单独成页
     `<li><button type="button" data-dview="${v.id}" aria-current="${state.section === 'days' && state.dview === v.id}"><span>${v.label}</span>${v.id === 'list' ? `<span class="n">${nDays}</span>` : ''}</button></li>`).join('');
   if (state.section === 'days') renderDaysSideCal();
@@ -347,35 +487,54 @@ function renderSide() {
   state.entries.forEach(e => nbCount.set(e.notebookId, (nbCount.get(e.notebookId) || 0) + 1));
   const nbs = sortedNotebooks();
   let nbHTML;
+  const defNb = nbById(state.prefs.defaultNotebook) ? state.prefs.defaultNotebook : '';
   if (state.editNotebooks) {
-    nbHTML = nbs.map(n => `<li class="edit-row">
+    // 编辑：拖左边的把手排序；“设为默认”= 打开网站时先显示这一本，新日记也默认放进这一本
+    nbHTML = nbs.map(n => `<li class="edit-row" data-sort-kind="nb" data-sort-id="${n.id}">
+      <span class="drag-handle" title="拖动排序" aria-hidden="true">⠿</span>
       <label class="sr-only" for="nb-name-${n.id}">日记本名称</label>
       <input id="nb-name-${n.id}" data-nbrename="${n.id}" value="${esc(n.name)}">
+      ${n.id === defNb ? `<button type="button" class="nb-def on" data-nbdef="" title="再点一次取消，打开网站时显示“所有”">默认</button>`
+        : `<button type="button" class="nb-def" data-nbdef="${n.id}" title="打开网站时先显示这一本">设为默认</button>`}
       <button type="button" data-delnb="${n.id}" ${nbs.length < 2 ? 'disabled title="至少要保留一个日记本"' : ''} aria-label="删除日记本 ${esc(n.name)}">删除</button></li>`).join('');
   } else {
     nbHTML = `<li><button type="button" data-nb="" aria-current="${!state.notebook}"><span>所有</span><span class="n">${state.entries.length}</span></button></li>`
-      + nbs.map(n => `<li><button type="button" data-nb="${n.id}" aria-current="${state.notebook === n.id}"><span>${esc(n.name)}</span><span class="n">${nbCount.get(n.id) || 0}</span></button></li>`).join('');
+      + nbs.map(n => `<li><button type="button" data-nb="${n.id}" aria-current="${state.notebook === n.id}"><span>${esc(n.name)}${n.id === defNb ? '<span class="def-mark">默认</span>' : ''}</span><span class="n">${nbCount.get(n.id) || 0}</span></button></li>`).join('');
   }
   if (state.addingNotebook) nbHTML += `<li class="edit-row"><label class="sr-only" for="new-nb">新日记本名称</label><input id="new-nb" placeholder="新日记本名称，回车确定" autocomplete="off"></li>`;
   $('#notebook-list').innerHTML = nbHTML;
+  if (state.editNotebooks) { $('#notebook-list').dataset.sortZone = 'nb'; $('#notebook-list').dataset.zoneId = ''; }
+  else delete $('#notebook-list').dataset.sortZone;
   $('#toggle-nb-edit').textContent = state.editNotebooks ? '完成' : '编辑';
 
-  // 标签：平时一行排好几个“生活（10）”，可以多选；编辑时一行一个，方便改名、删除
+  // 标签：按分组显示，平时一行排好几个“生活（10）”，可以多选。
+  // 编辑时：点标签改名 / 删除 / 换分组；拖动标签换位置或拖进别的分组；拖分组名给分组排序
   const counts = tagCounts();
-  const tags = [...state.tags].sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0) || a.name.localeCompare(b.name, 'zh'));
+  const tags = sortedTags();
   const shown = state.editTags ? tags : tags.filter(t => counts.get(t.id) || state.tagSel.includes(t.id));
   const list = $('#tag-list');
-  list.className = state.editTags ? 'nav cloud editing' : 'nav cloud';
-  if (!shown.length) list.innerHTML = '<li><p class="muted">在正文里写 #标签，就会出现在这里。</p></li>';
-  else if (state.editTags) {
-    // 编辑模式：样子不变，鼠标移上去变红；点一下才弹出“改名 / 删除”
-    list.innerHTML = shown.map(t => `<li><button type="button" data-tagedit="${t.id}" title="改名或删除">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`).join('')
-      + '<li class="hint"><p class="muted">点标签可以改名或删除。</p></li>';
-  } else {
-    list.innerHTML = shown.map(t => {
-      const on = state.tagSel.includes(t.id);
-      return `<li><button type="button" data-tag="${t.id}" aria-pressed="${on}" title="${on ? '再点一次取消' : '只看有这个标签的日记（可以多选）'}">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`;
+  list.className = state.editTags ? 'nav tag-groups editing' : 'nav tag-groups';
+  const tagBtn = t => {
+    if (state.editTags) return `<li data-sort-kind="tag" data-sort-id="${t.id}"><button type="button" data-tagedit="${t.id}" title="点一下改名、删除或换分组；按住拖动排序">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`;
+    const on = state.tagSel.includes(t.id);
+    return `<li><button type="button" data-tag="${t.id}" aria-pressed="${on}" title="${on ? '再点一次取消' : '只看有这个标签的日记（可以多选）'}">${esc(t.name)}<span class="n">（${counts.get(t.id) || 0}）</span></button></li>`;
+  };
+  const cloud = (gid, items) => `<ul class="nav cloud"${state.editTags ? ` data-sort-zone="tag" data-zone-id="${gid}"` : ''}>${items.map(tagBtn).join('')}${state.editTags && !items.length ? '<li class="sort-tail"><span class="muted">拖标签到这里</span></li>' : ''}</ul>`;
+  if (!tags.length) list.innerHTML = '<li><p class="muted">在正文里写 #标签，就会出现在这里。</p></li>';
+  else {
+    const loose = shown.filter(t => !groupOfTag(t));
+    let html = loose.length || state.editTags ? `<li class="tg-block tg-loose">${cloud('', loose)}</li>` : '';
+    const groupsHTML = tagGroups().map(g => {
+      const items = shown.filter(t => groupOfTag(t) === g.id);
+      if (!items.length && !state.editTags) return '';
+      const head = state.editTags
+        ? `<p class="tg-name"><span class="drag-handle" title="拖动给分组排序" aria-hidden="true">⠿</span><button type="button" data-tgedit="${g.id}" title="改名或删除分组">${esc(g.name)}</button></p>`
+        : `<p class="tg-name">${esc(g.name)}</p>`;
+      return `<li class="tg-block"${state.editTags ? ` data-sort-kind="tgroup" data-sort-id="${g.id}"` : ''}>${head}${cloud(g.id, items)}</li>`;
     }).join('');
+    html += state.editTags ? `<li><ul class="nav tg-list" data-sort-zone="tgroup" data-zone-id="">${groupsHTML}</ul></li>` : groupsHTML;
+    if (state.editTags) html += '<li class="hint"><button type="button" class="link-btn" id="add-tgroup">＋ 新建分组</button><p class="muted">点标签可以改名、删除或换分组；按住标签拖动可以排序，拖进别的分组。</p></li>';
+    list.innerHTML = html;
   }
   $('#toggle-tag-edit').textContent = state.editTags ? '完成' : '编辑';
   $('#toggle-tag-edit').hidden = !tags.length;
@@ -437,7 +596,7 @@ function previewText(e) {
 }
 function ariaLabel(e) {
   const d = new Date(e.date);
-  return esc(`${e.title || e.body.slice(0, 20) || '没有文字的日记'}，${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`);
+  return esc(`${e.title || plainText(e.body).slice(0, 20) || '没有文字的日记'}，${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`);
 }
 function entryHTML(e) {
   const d = new Date(e.date);
@@ -518,7 +677,7 @@ function renderYears(list, view) {
     let body;
     if (!exists) body = `<div class="slot-empty">这一年没有 2 月 29 日。</div>`;
     else if (items.length) body = items.map(yearEntryHTML).join('');
-    else body = `<div class="slot-empty"><span>这一天没有写日记。</span>${key <= today ? `<button type="button" class="slot-write" data-write="${key}">${key === today ? '现在写' : '补写这一天'}</button>` : ''}</div>`;
+    else body = `<div class="slot-empty"><span>这一天没有写日记。</span>${key === today ? `<button type="button" class="slot-write" data-write="${key}">现在写</button>` : ''}</div>`;
     html += `<section class="yrow${key === today ? ' now' : ''}" aria-label="${y}年">
       <div class="y-label"><span class="y">${y}</span>${exists ? `<span class="wk">${WEEK[date.getDay()]}</span>` : ''}</div>
       <div class="y-entries">${body}</div></section>`;
@@ -635,17 +794,39 @@ const firstGrapheme = s => {
   try { return [...new Intl.Segmenter('zh', { granularity: 'grapheme' }).segment(s)][0].segment; } catch (e) { return [...s][0]; }
 };
 
+/* v0.8：“倒数日”“纪念日”变成两个标记（countdown / memorial），和“放进人生足迹”并列。
+   以前的 countMode 不读也不删：没有标记的旧数据按原来的样子补上——
+   每年重复的：显示“离下一次”→ 倒数日，显示“已经多少天”→ 纪念日；不重复的：以后的 → 倒数日，过去的 → 纪念日。
+   remind：提前几天提醒（null = 不提醒）；remindSeen：已经看过哪一次的提醒（那一次的日期）；
+   entries：关联的手记 id。 */
+function normalizeAnn(raw) {
+  const a = { emoji: '', group: '', repeat: 'none', countMode: 'next', life: false, note: '', remind: null, remindSeen: '', entries: [], ...raw };
+  const future = a.date > todayKey();
+  if (typeof a.countdown !== 'boolean') a.countdown = a.repeat === 'yearly' ? a.countMode !== 'since' : future;
+  if (typeof a.memorial !== 'boolean') a.memorial = a.repeat === 'yearly' ? a.countMode === 'since' : !future;
+  return a;
+}
 function birthdayItem() {
-  return state.life.birth ? { id: BDAY_ID, title: '生日', emoji: '🎂', date: state.life.birth, repeat: 'yearly', group: '', life: false, note: '', birthday: true } : null;
+  const L = state.life;
+  return L.birth ? { id: BDAY_ID, title: '生日', emoji: '🎂', date: L.birth, repeat: 'yearly', group: '', life: false, note: '', birthday: true,
+    countdown: true, memorial: false, remind: L.remind ?? null, remindSeen: L.remindSeen || '', entries: [] } : null;
 }
 const allDays = () => { const b = birthdayItem(); return b ? [b, ...state.days] : [...state.days]; };
 const annById = id => allDays().find(a => a.id === id);
-const dayGroups = () => [...new Set(state.days.map(a => a.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+// 名称可以有好几行；只能放一行的地方用第一行
+const annName = a => (a.title || '').split('\n').find(l => l.trim()) || '';
+// 分类：按拖出来的顺序，没排过的按名字排在后面
+function dayGroups() {
+  const order = state.prefs.dayGroupOrder || [];
+  const all = [...new Set(state.days.map(a => a.group).filter(Boolean))];
+  const idx = g => { const i = order.indexOf(g); return i < 0 ? Infinity : i; };
+  return all.sort((a, b) => idx(a) - idx(b) || a.localeCompare(b, 'zh'));
+}
 
 // 一个日子现在的状态：since 已经 N 天 / until 还有 N 天 / next 每年重复的，离下一次还有 N 天
 function dayInfo(a, today = todayKey()) {
   const since = dayDiff(a.date, today);
-  if (a.repeat === 'yearly' && since > 0 && a.countMode !== 'since') {   // countMode：每年重复的日子显示“距离下一次”还是“已经多少天”
+  if (a.repeat === 'yearly' && since > 0 && a.countdown) {   // 标了“倒数日”的每年重复的日子：显示离下一次还有几天
     const nx = nextYearly(a.date, today);
     return { mode: 'next', target: nx.date, days: dayDiff(today, nx.date), since, nth: nx.n };
   }
@@ -692,20 +873,11 @@ function ageAt(birth, k) {
   return y + dayDiff(start, k) / dayDiff(start, end);
 }
 
-/* ----- 倒数：列表 + 详情 ----- */
-// “还有”的日子：一行一个，下面一排小格子是进度。size: 'big' 大事 / 'small' 日常
-function annRowHTML({ a, i }, today, sel) {
-  return `<button type="button" class="ann" data-ann="${a.id}" aria-current="${a.id === sel}">
-    <span class="ann-main"><span class="ann-title">${esc(a.title)}</span><span class="ann-sub">${esc(annSub(a, i))}</span></span>
-    <span class="ann-num">${numHTML(i)}</span>
-    ${dotsHTML(annProgress(a, i, today), 30)}
-  </button>`;
-}
-// “已经”的日子：竖线时间轴上的一个点（不显示 emoji 和进度格子）
-function tlItemHTML({ a, i }, sel) {
-  return `<li><button type="button" class="tl-item" data-ann="${a.id}" aria-current="${a.id === sel}">
-    <span class="ann-main"><span class="ann-title">${esc(a.title)}</span><span class="ann-sub">${fmtSmart(a.date)}${a.repeat === 'yearly' ? ' · 每年' : ''}</span></span>
-    <span class="ann-num">${numHTML(i)}</span></button></li>`;
+/* ----- 时间轴：列表 + 详情 ----- */
+// 只放已经过去（含今天）的日子：同一天的几件事放在同一个日期下面，名称可以有好几行，不显示天数
+function tlDayHTML(day, items, sel) {
+  return `<li class="tl-day"><p class="tl-date">${day}</p>${items.map(a =>
+    `<button type="button" class="tl-ev" data-ann="${a.id}" aria-current="${a.id === sel}">${esc(a.title)}</button>`).join('')}</li>`;
 }
 // 一格一格的时间：格子太多时自动换成每格一周 / 一个月 / 一年
 const UNITS = [[1, '一天'], [7, '一周'], [30.4375, '一个月'], [365.25, '一年']];
@@ -742,6 +914,20 @@ function marksHTML(a, today) {
     <ol>${past.map(k => row(k, 'done', '已达成')).join('')}${future.map((k, j) => row(k, j === 0 ? 'next' : '', `${fmtN(dayDiff(today, k.date))} 天后`)).join('')}</ol>
   </section>`;
 }
+const remindLabel = n => n === 0 ? '当天提醒' : `提前 ${n} 天提醒`;
+const entryTime = e => `${fmtFull(e.date.slice(0, 10))} ${e.date.slice(11, 16)}`;
+const entryLabel = e => (e.title || plainText(e.body).split('\n').find(l => l.trim()) || '没有文字的日记').slice(0, 80);
+// 关联的手记：点一下打开那篇的阅读页
+function annEntriesHTML(a) {
+  if (a.birthday) return '';
+  const linked = (a.entries || []).map(id => state.entries.find(e => e.id === id)).filter(Boolean).sort((x, y) => x.date.localeCompare(y.date));
+  const sameDay = state.entries.filter(e => e.date.slice(0, 10) === a.date && !(a.entries || []).includes(e.id)).length;
+  return `<section class="d-entries">
+    <div class="td-row"><p class="d-label">关联手记</p><button type="button" class="text-btn" id="ann-link">${linked.length ? '修改' : '＋ 关联手记'}</button></div>
+    ${linked.map(e => `<button type="button" class="d-entry" data-openentry="${e.id}"><span class="ann-sub">${entryTime(e)}</span><span class="td-title">${esc(entryLabel(e))}</span></button>`).join('')}
+    ${linked.length ? '' : `<p class="muted">${sameDay ? `这天写了 ${sameDay} 篇手记，可以关联起来。` : '还没有关联手记。'}</p>`}
+  </section>`;
+}
 function annDetailHTML(a) {
   const today = todayKey(), i = dayInfo(a, today);
   const lines = [];
@@ -758,51 +944,54 @@ function annDetailHTML(a) {
     lines.push(fmtFull(a.date));
     if (i.days >= 31) lines.push(`也就是 ${spanText(today, a.date)}以后`);
   }
-  const tags = [a.group && '#' + a.group, a.life && '人生足迹', a.repeat === 'yearly' && '每年重复'].filter(Boolean);
-  return `<article class="d-detail" aria-label="${esc(a.title)}">
+  const tags = [a.group && '#' + a.group, a.countdown && '倒数日', a.memorial && '纪念日', a.life && '人生足迹', a.repeat === 'yearly' && '每年重复',
+    a.remind != null && remindLabel(a.remind)].filter(Boolean);
+  return `<article class="d-detail" aria-label="${esc(annName(a))}">
     ${isPhone() ? '<button type="button" class="back-link" id="ann-back">← 返回</button>' : ''}
     ${gridHTML(a, i, today)}
-    <div class="d-head"><h3>${esc(a.title)}</h3>
+    <div class="d-head">${a.emoji ? `<span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>` : ''}<h3>${esc(a.title)}</h3>
       <button type="button" class="text-btn" id="ann-edit">${a.birthday ? '改出生日期' : '编辑'}</button></div>
     ${tags.length ? `<p class="d-meta">${esc(tags.join(' · '))}</p>` : ''}
     <div class="d-big"><span class="pre">${i.days === 0 ? '' : i.mode === 'since' ? '已经' : '还有'}</span>${numHTML(i)}</div>
     <div class="d-lines">${lines.map(l => `<p>${esc(l)}</p>`).join('')}</div>
-    ${a.repeat === 'yearly' && !a.birthday && dayDiff(a.date, today) > 0 ? `<button type="button" class="text-btn d-switch" id="ann-count">${a.countMode === 'since' ? '改成显示：离下一次还有几天' : '改成显示：已经过了多少天'}</button>` : ''}
     ${a.note ? `<p class="d-note">${esc(a.note)}</p>` : ''}
+    ${annEntriesHTML(a)}
     ${i.mode !== 'until' ? marksHTML(a, today) : ''}
   </article>`;
 }
 function renderDList() {
   const today = todayKey();
   const groups = dayGroups();
-  if (state.dgroup && !groups.includes(state.dgroup)) state.dgroup = '';
-  const list = allDays().filter(a => !state.dgroup || a.group === state.dgroup).map(a => ({ a, i: dayInfo(a, today) }));
-  const coming = list.filter(x => x.i.mode !== 'since').sort((x, y) => x.i.days - y.i.days);
-  const gone = list.filter(x => x.i.mode === 'since').sort((x, y) => y.a.date.localeCompare(x.a.date));
-  setTitle(state.dgroup || '时间轴', `${list.length} 个日子`);
-  if (!list.some(x => x.a.id === state.dsel)) state.dsel = ((coming[0] || gone[0] || {}).a || {}).id || null;
+  state.dgroups = state.dgroups.filter(g => groups.includes(g));
+  const inGroup = a => !state.dgroups.length || state.dgroups.includes(a.group);
+  const gone = allDays().filter(a => inGroup(a) && a.date <= today)
+    .sort((x, y) => y.date.localeCompare(x.date) || (x.createdAt || '').localeCompare(y.createdAt || ''));
+  setTitle(state.dgroups.length ? state.dgroups.join(' + ') : '时间轴', `${gone.length} 条`);
+  // 从“今日”点进来的以后的日子也能看详情，只是不在列表里
+  let sel = annById(state.dsel);
+  if (!sel || !inGroup(sel)) { sel = gone[0] || null; state.dsel = sel ? sel.id : null; }
   const phone = isPhone();
-  const sel = annById(state.dsel);
   if (phone && state.dopen && sel) { $('#timeline').innerHTML = annDetailHTML(sel); return; }
   state.dopen = false;
-  const chips = groups.length ? `<div class="chips" role="group" aria-label="分类">
-    <button type="button" data-dgroup="" aria-pressed="${!state.dgroup}">全部</button>
-    ${groups.map(g => `<button type="button" data-dgroup="${esc(g)}" aria-pressed="${state.dgroup === g}">${esc(g)}</button>`).join('')}</div>` : '';
+  // 分类：可以多选；电脑上按住拖动、手机上长按拖动可以排序
+  const chips = groups.length ? `<div class="chips" role="group" aria-label="分类（可以多选）" data-sort-zone="dgroup" data-zone-id="">
+    <button type="button" data-dgroup="" aria-pressed="${!state.dgroups.length}">全部</button>
+    ${groups.map(g => `<button type="button" data-dgroup="${esc(g)}" data-sort-kind="dgroup" data-sort-id="${esc(g)}" aria-pressed="${state.dgroups.includes(g)}" title="可以多选；按住拖动排序">${esc(g)}</button>`).join('')}</div>` : '';
   const selId = phone ? null : state.dsel;
   let rows = '';
-  if (coming.length) rows += `<div class="month"><h3>还有</h3></div>` + coming.map(x => annRowHTML(x, today, selId)).join('');
-  // 已经过去的日子：按年份排成一条竖线时间轴
   if (gone.length) {
-    let year = '', tl = '';
-    for (const x of gone) {
-      if (x.a.date.slice(0, 4) !== year) { year = x.a.date.slice(0, 4); tl += `<li class="tl-year">${year}</li>`; }
-      tl += tlItemHTML(x, selId);
+    let tl = '', day = '', items = [];
+    for (const a of gone) {
+      if (a.date !== day) { if (items.length) tl += tlDayHTML(day, items, selId); day = a.date; items = []; }
+      items.push(a);
     }
-    rows += `<div class="month"><h3>已经</h3></div><ol class="tl">${tl}</ol>`;
+    tl += tlDayHTML(day, items, selId);
+    rows = `<ol class="tl">${tl}</ol>`;
+  } else {
+    rows = `<div class="empty"><p>${!state.days.length ? '还没有记下任何日子。' : state.dgroups.length ? '这个分类里还没有过去的日子。' : '还没有过去的日子。以后的日子在“今日”的倒数日里。'}</p><button type="button" class="btn" id="ann-new">记一个日子</button></div>`;
   }
-  if (!list.length) rows = `<div class="empty"><p>${state.days.length ? '这个分类里还没有日子。' : '还没有记下任何日子。'}</p><button type="button" class="btn" id="ann-new">记一个日子</button></div>`;
   const listHTML = `<div class="d-list">${chips}${rows}</div>`;
-  $('#timeline').innerHTML = phone ? listHTML : `<div class="d-split">${listHTML}${sel ? annDetailHTML(sel) : ''}</div>`;
+  $('#timeline').innerHTML = phone ? listHTML : `<div class="d-split">${listHTML}<div class="d-side">${sel ? annDetailHTML(sel) : ''}</div></div>`;
 }
 
 /* ----- 今日 ----- */
@@ -811,14 +1000,17 @@ function smallRowHTML({ a, i }) {
   const sub = i.mode === 'since' ? `自 ${fmtSmart(a.date)}` : fmtSmart(i.target);
   return `<button type="button" class="td-item" data-goann="${a.id}">
     <span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>
-    <span class="ann-main"><span class="td-title">${esc(a.title)}</span><span class="ann-sub">${esc(sub)}</span></span>
+    <span class="ann-main"><span class="td-title">${esc(annName(a))}</span><span class="ann-sub">${esc(sub)}</span></span>
     <span class="td-n">${n}</span></button>`;
 }
 function renderDToday() {
   const today = todayKey(), now = new Date();
   const items = allDays().map(a => ({ a, i: dayInfo(a, today) }));
-  const coming = items.filter(x => x.i.mode !== 'since').sort((x, y) => x.i.days - y.i.days);
-  const recent = items.filter(x => x.i.mode === 'since').sort((x, y) => y.a.date.localeCompare(x.a.date));
+  // 倒数日：标了“倒数日”、还没到（或每年重复的下一次）；纪念日：标了“纪念日”的，显示已经多少天
+  const coming = items.filter(x => x.a.countdown && x.i.mode !== 'since').sort((x, y) => x.i.days - y.i.days);
+  const memorials = items.filter(x => x.a.memorial)
+    .map(x => x.i.mode === 'next' ? { a: x.a, i: { mode: 'since', target: x.a.date, days: x.i.since, since: x.i.since } } : x)
+    .sort((x, y) => y.a.date.localeCompare(x.a.date));
   const y = now.getFullYear();
   const frac = (now - new Date(y, 0, 1)) / (new Date(y + 1, 0, 1) - new Date(y, 0, 1));
   const [, m, d] = today.split('-').map(Number);
@@ -830,7 +1022,7 @@ function renderDToday() {
   const thisYear = state.days.filter(a => a.date.startsWith(String(y))).length;
   setTitle('今日', '');
   const sTop = `<section class="td-top">
-      ${next ? `<p class="td-hint">离 ${esc(next.a.title)} ${next.i.days ? `还有 ${fmtN(next.i.days)} 天` : '就是今天'}</p>` : ''}
+      ${next ? `<p class="td-hint">离 ${esc(annName(next.a))} ${next.i.days ? `还有 ${fmtN(next.i.days)} 天` : '就是今天'}</p>` : ''}
       <div class="td-date"><span class="big-num">${m}月${d}日</span><span class="td-wk">${WEEK_FULL[now.getDay()]}</span></div>
     </section>`;
   const sYear = `<section>
@@ -838,17 +1030,17 @@ function renderDToday() {
       <span title="每格一周">${dotsHTML(frac, 52)}</span>
     </section>`;
   const sNext = `<section>
-      <p class="d-label">下一个值得期待的日子</p>
+      <p class="d-label">倒数日</p>
       ${next ? `<button type="button" class="td-next" data-goann="${next.a.id}">
-          <span class="ann-main"><span class="td-title"><span class="ann-emoji" aria-hidden="true">${esc(next.a.emoji)}</span>${esc(next.a.title)}</span>
+          <span class="ann-main"><span class="td-title"><span class="ann-emoji" aria-hidden="true">${esc(next.a.emoji)}</span>${esc(annName(next.a))}</span>
           <span class="ann-sub">${esc(annSub(next.a, next.i))}</span></span>
           <span class="ann-num">${numHTML(next.i)}</span></button>
-          ${coming.slice(1, 4).map(smallRowHTML).join('')}`
-        : `<p class="muted">还没有要倒数的日子。</p>`}
+          ${coming.slice(1).map(smallRowHTML).join('')}`
+        : `<p class="muted">还没有标为“倒数日”的日子。</p>`}
     </section>`;
   const sPast = `<section>
-      <p class="d-label">过去的日子</p>
-      ${recent.length ? recent.slice(0, 5).map(smallRowHTML).join('') : `<p class="muted">还没有记下的日子。<button type="button" class="slot-write" id="ann-new">记一个</button></p>`}
+      <p class="d-label">纪念日</p>
+      ${memorials.length ? memorials.map(smallRowHTML).join('') : `<p class="muted">还没有标为“纪念日”的日子。<button type="button" class="slot-write" id="ann-new">记一个</button></p>`}
     </section>`;
   const sLedger = `<section class="ledger">
       <p class="d-label">时间账本</p>
@@ -860,11 +1052,10 @@ function renderDToday() {
       </div>
       ${firstRec ? `<p class="ledger-note">已陪伴 ${fmtN(Math.max(0, dayDiff(firstRec, today)) + 1)} 天</p>` : ''}
     </section>`;
-  // 电脑：左栏 日期 / 今年已过 / 时间账本，右栏 下一个 / 过去的日子。手机：一栏，顺序不变
-  const sScale = timeScaleHTML(now);
+  // 电脑：左栏 日期 / 今年已过 / 时间账本，右栏 倒数日 / 纪念日。手机：一栏。时间刻度在“人生”页最后
   $('#timeline').innerHTML = isPhone()
-    ? `<div class="today"><div class="td-col">${sTop}${sYear}${sNext}${sPast}${sLedger}${sScale}</div></div>`
-    : `<div class="today"><div class="td-col">${sTop}${sYear}${sLedger}${sScale}</div><div class="td-col">${sNext}${sPast}</div></div>`;
+    ? `<div class="today"><div class="td-col">${sTop}${sYear}${sNext}${sPast}${sLedger}</div></div>`
+    : `<div class="today"><div class="td-col">${sTop}${sYear}${sLedger}</div><div class="td-col">${sNext}${sPast}</div></div>`;
 }
 // 时间刻度：在世界上逗留了多久 + 今年 / 本月 / 本周过了多少
 function timeScaleHTML(now) {
@@ -908,8 +1099,8 @@ function lifeDotsHTML(birth, span, age, sel, events) {
     const yr = Math.floor(mi / 12);
     const cls = [mi < nowM ? 'past' : mi === nowM ? 'now' : '', yr === sel && 'sel'].filter(Boolean).join(' ');
     const e = ev.get(mi);
-    if (e && e.emoji) s += `<span class="ld ev${yr === sel ? ' sel' : ''}" data-lifeage="${yr}" title="${esc(e.title)} · ${yr} 岁">${esc(e.emoji)}</span>`;
-    else s += `<span class="ld ${cls}${e ? ' mark' : ''}" data-lifeage="${yr}" title="${e ? esc(e.title) + ' · ' : ''}${yr} 岁${mi === nowM ? ' · 现在' : ''}"></span>`;
+    if (e && e.emoji) s += `<span class="ld ev${yr === sel ? ' sel' : ''}" data-lifeage="${yr}" title="${esc(annName(e))} · ${yr} 岁">${esc(e.emoji)}</span>`;
+    else s += `<span class="ld ${cls}${e ? ' mark' : ''}" data-lifeage="${yr}" title="${e ? esc(annName(e)) + ' · ' : ''}${yr} 岁${mi === nowM ? ' · 现在' : ''}"></span>`;
   }
   return `<div class="life-dots" role="img" aria-label="从出生到 ${span} 岁，每个点是一个月">${s}</div>`;
 }
@@ -934,8 +1125,10 @@ function renderDLife() {
     if (a.date.slice(0, 4) !== year) { year = a.date.slice(0, 4); fps += `<li class="fp-year">${year}</li>`; }
     const ageTxt = a.date >= L.birth ? ` · ${Math.floor(ageAt(L.birth, a.date))} 岁` : '';
     fps += `<li><button type="button" class="fp" data-goann="${a.id}"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>
-      <span class="ann-main"><span class="td-title">${esc(a.title)}</span><span class="ann-sub">${shortDate(a.date)}${ageTxt} · ${ago(a)}</span></span></button></li>`;
+      <span class="ann-main"><span class="td-title">${esc(annName(a))}</span><span class="ann-sub">${shortDate(a.date)}${ageTxt} · ${ago(a)}</span></span></button></li>`;
   }
+  // 时间刻度放在“人生”页最后：电脑在左栏最下面，手机在整页最下面
+  const phone = isPhone(), sScale = timeScaleHTML(new Date());
   $('#timeline').innerHTML = `<div class="life">
     <div class="life-col">
       <div class="life-head">
@@ -951,14 +1144,16 @@ function renderDLife() {
           ${sel !== cur ? `<button type="button" class="text-btn" data-lifeage="${cur}">回到今年</button>` : ''}
           <button type="button" class="text-btn" data-lifeage="${sel + 1}" ${sel >= span - 1 ? 'disabled' : ''} aria-label="后一年">›</button></span></div>
         <p class="ann-sub">${shortDate(yStart)} – ${shortDate(yEnd)}${sel === cur ? ' · 就是现在' : ''}</p>
-        ${inYear.length ? `<ul class="fp-list">${inYear.map(a => `<li><button type="button" class="fp" data-goann="${a.id}"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span><span class="ann-main"><span class="td-title">${esc(a.title)}</span><span class="ann-sub">${fmtSmart(a.date)}</span></span></button></li>`).join('')}</ul>`
+        ${inYear.length ? `<ul class="fp-list">${inYear.map(a => `<li><button type="button" class="fp" data-goann="${a.id}"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span><span class="ann-main"><span class="td-title">${esc(annName(a))}</span><span class="ann-sub">${fmtSmart(a.date)}</span></span></button></li>`).join('')}</ul>`
           : `<p class="muted">这一年还没有记下人生足迹。</p>`}
       </section>
       <section class="life-next"><p class="d-label">下一站</p><p>再过 ${fmtN(dayDiff(today, nextBday.date))} 天，迎来 ${nextBday.n} 岁生日</p></section>
+      ${phone ? '' : sScale}
     </div>
     <div class="life-col">
       <div class="td-row"><p class="d-label">人生足迹</p><button type="button" class="text-btn" id="ann-new" data-life="1">＋ 添加</button></div>
       ${evs.length ? `<ol class="fp-list fp-line">${fps}</ol>` : `<p class="muted">新建日子时勾选“放进人生足迹”，重要的事就会出现在这里，也会标在上面的点阵里。</p>`}
+      ${phone ? sScale : ''}
     </div>
   </div>`;
 }
@@ -987,7 +1182,7 @@ function renderDaysSideCal() {
     const ev = list.find(a => a.emoji);
     const selDay = state.dview === 'list' && state.dsel && (annById(state.dsel) || {}).date;
     const cls = ['cal-day', k === today && 'today', k === selDay && 'sel', ev && 'emo', list.length && !ev && 'has', list.length > 1 && 'more'].filter(Boolean).join(' ');
-    const names = list.map(a => a.title).join('、');
+    const names = list.map(annName).join('、');
     cells += `<button type="button" class="${cls}" ${list.length ? `data-dgo="${list[0].id}" title="${esc(names)}"` : 'tabindex="-1"'} aria-label="${m}月${d}日${names ? '：' + esc(names) : ''}">${ev ? esc(ev.emoji) : d}</button>`;
   }
   $('#days-cal').innerHTML = `<div class="cal-head"><button type="button" data-dcal="-1" aria-label="上个月">‹</button><span>${y} · ${MONTH_CN[m - 1]}</span><button type="button" data-dcal="1" aria-label="下个月">›</button></div><div class="cal-grid">${cells}</div>`;
@@ -1003,7 +1198,7 @@ function renderDCal() {
     const k = `${ym}-${pad(d)}`, list = evs.get(k) || [];
     const first = list[0];
     const cls = ['ec-day', k === today && 'today', k === state.dcalDay && 'sel', list.length && !(first && first.emoji) && 'has'].filter(Boolean).join(' ');
-    const label = list.length ? `${m}月${d}日：${list.map(a => a.title).join('、')}` : `${m}月${d}日`;
+    const label = list.length ? `${m}月${d}日：${list.map(annName).join('、')}` : `${m}月${d}日`;
     cells += `<button type="button" class="${cls}" data-dday="${k}" aria-label="${esc(label)}">
       ${first && first.emoji ? `<span class="ec-emoji">${esc(first.emoji)}</span>` : `<span class="ec-num">${d}</span>`}${list.length > 1 ? '<i class="ec-more" aria-hidden="true"></i>' : ''}</button>`;
   }
@@ -1045,7 +1240,8 @@ function goAnn(id) {
   const a = annById(id);
   if (!a) return;
   state.section = 'days'; state.dview = 'list'; state.dsel = id; state.dopen = isPhone();
-  if (state.dgroup && a.group !== state.dgroup) state.dgroup = '';
+  if (state.dgroups.length && !state.dgroups.includes(a.group)) state.dgroups = [];
+  state.readFrom = null;
   state.dAllMarks = false;
   closeMPanel(); render(); scrollTop();
 }
@@ -1053,20 +1249,23 @@ function goAnn(id) {
 /* ----- 新建 / 编辑一个日子（浮在上面的小纸） ----- */
 function newAnn(extra = {}) {
   return {
-    id: uid(), title: '', date: todayKey(), emoji: '', group: state.dview === 'list' ? state.dgroup : '',
-    repeat: 'none', countMode: 'next', life: state.dview === 'life', note: '', createdAt: new Date().toISOString(), updatedAt: null, ...extra,
+    id: uid(), title: '', date: todayKey(), emoji: '', group: state.dview === 'list' && state.dgroups.length === 1 ? state.dgroups[0] : '',
+    repeat: 'none', countdown: false, memorial: false, life: state.dview === 'life', remind: null, remindSeen: '', entries: [], note: '',
+    createdAt: new Date().toISOString(), updatedAt: null, ...extra,
   };
 }
+const REMIND_OPTS = [['', '不提醒'], ['0', '当天'], ['1', '提前 1 天'], ['3', '提前 3 天'], ['7', '提前 7 天']];
+const remindSelect = (id, v) => `<select id="${id}" class="dialog-input">${REMIND_OPTS.map(([k, l]) => `<option value="${k}" ${String(v ?? '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
 function openAnnEditor(a, isNew) {
   if (a.birthday) return openLifeSettings();
   closeMPanel();
-  state.dEditing = { kind: 'ann', a: { ...a }, isNew };
+  state.dEditing = { kind: 'ann', a: { ...a }, isNew, flagsTouched: !isNew };
   $('#editor').innerHTML = `<div class="dialog ann-form" role="dialog" aria-modal="true" aria-label="${isNew ? '记一个日子' : '编辑日子'}">
     <div class="af-top">
       <label class="sr-only" for="af-emoji">图标（一个 emoji）</label>
       <input id="af-emoji" class="af-emoji" value="${esc(a.emoji)}" placeholder="☺" autocomplete="off">
-      <label class="sr-only" for="af-title">名称</label>
-      <input id="af-title" class="af-title" value="${esc(a.title)}" placeholder="名称，比如：第一次上课" autocomplete="off">
+      <label class="sr-only" for="af-title">内容</label>
+      <textarea id="af-title" class="af-title" rows="1" placeholder="发生了什么？可以写好几行">${esc(a.title)}</textarea>
     </div>
     <div class="af-picks" role="group" aria-label="常用图标">${EMOJI_PICKS.map(e => `<button type="button" data-pick="${e}">${e}</button>`).join('')}</div>
     <label class="dialog-label" for="af-date">日期</label>
@@ -1075,40 +1274,53 @@ function openAnnEditor(a, isNew) {
     <input id="af-group" class="dialog-input" list="af-groups" value="${esc(a.group)}" placeholder="比如：英国、攀岩、DDL" autocomplete="off">
     <datalist id="af-groups">${dayGroups().map(g => `<option value="${esc(g)}">`).join('')}</datalist>
     <label class="af-check"><input type="checkbox" id="af-repeat" ${a.repeat === 'yearly' ? 'checked' : ''}> 每年重复（生日、周年纪念）</label>
-    <div class="af-sub" id="af-countrow" ${a.repeat === 'yearly' ? '' : 'hidden'}>
-      <p class="dialog-label">大数字显示</p>
-      <div class="af-seg" role="radiogroup" aria-label="大数字显示">
-        <label><input type="radio" name="af-count" value="next" ${a.countMode !== 'since' ? 'checked' : ''}> 离下一次还有几天</label>
-        <label><input type="radio" name="af-count" value="since" ${a.countMode === 'since' ? 'checked' : ''}> 已经过了多少天</label>
-      </div>
+    <div class="af-flags" role="group" aria-label="标记">
+      <label class="af-check"><input type="checkbox" id="af-countdown" ${a.countdown ? 'checked' : ''}> 倒数日</label>
+      <label class="af-check"><input type="checkbox" id="af-memorial" ${a.memorial ? 'checked' : ''}> 纪念日</label>
+      <label class="af-check"><input type="checkbox" id="af-life" ${a.life ? 'checked' : ''}> 放进人生足迹</label>
     </div>
-    <label class="af-check"><input type="checkbox" id="af-life" ${a.life ? 'checked' : ''}> 放进“人生足迹”（重要的人生事件）</label>
+    <p class="af-hint">倒数日、纪念日会出现在“今日”页。</p>
+    <label class="dialog-label" for="af-remind">提醒（打开网站时先看到）</label>
+    ${remindSelect('af-remind', a.remind)}
     <label class="dialog-label" for="af-note">备注（可以不写）</label>
     <textarea id="af-note" class="dialog-input af-note" rows="2">${esc(a.note)}</textarea>
     <div class="row">${isNew ? '' : '<button type="button" class="text-btn danger" id="af-del">删除</button>'}<span class="grow"></span>
       <button type="button" class="btn ghost" id="af-cancel">取消</button><button type="button" class="btn" id="af-save" title="⌘↵">保存</button></div>
   </div>`;
   $('#editor').hidden = false;
+  fitAnnTitle();
   $('#af-title').focus();
 }
+// 内容框跟着文字变高
+function fitAnnTitle() {
+  const ta = $('#af-title');
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = ta.scrollHeight + 'px';
+}
 function readAnnForm() {
+  const r = $('#af-remind').value;
   return {
     ...state.dEditing.a,
     emoji: firstGrapheme($('#af-emoji').value.trim()),
-    title: $('#af-title').value.trim(),
+    title: $('#af-title').value.replace(/^\s*\n/, '').trimEnd(),
     date: $('#af-date').value,
     group: $('#af-group').value.trim().replace(/^#/, ''),
     repeat: $('#af-repeat').checked ? 'yearly' : 'none',
+    countdown: $('#af-countdown').checked,
+    memorial: $('#af-memorial').checked,
     life: $('#af-life').checked,
-    countMode: ($('input[name="af-count"]:checked') || {}).value || 'next',
+    remind: r === '' ? null : Number(r),
     note: $('#af-note').value.trim(),
   };
 }
 function annDirty() {
   const ed = state.dEditing;
-  if (!ed || ed.kind !== 'ann') return false;
+  if (!ed) return false;
+  if (ed.kind === 'links') return ed.changed;
+  if (ed.kind !== 'ann') return false;
   const now = readAnnForm();
-  return ['emoji', 'title', 'date', 'group', 'repeat', 'countMode', 'life', 'note'].some(k => now[k] !== ed.a[k]);
+  return ['emoji', 'title', 'date', 'group', 'repeat', 'countdown', 'memorial', 'life', 'remind', 'note'].some(k => now[k] !== ed.a[k]);
 }
 function closeAnnEditor() { state.dEditing = null; $('#editor').hidden = true; $('#editor').innerHTML = ''; }
 async function cancelAnnEditor() {
@@ -1119,7 +1331,7 @@ async function saveAnn() {
   const ed = state.dEditing;
   if (!ed) return;
   const a = readAnnForm();
-  if (!a.title) { toast('写一个名称吧'); $('#af-title').focus(); return; }
+  if (!a.title.trim()) { toast('写点内容吧'); $('#af-title').focus(); return; }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(a.date)) { toast('请选一个日期'); $('#af-date').focus(); return; }
   a.updatedAt = new Date().toISOString();
   $('#af-save').disabled = true;
@@ -1132,13 +1344,13 @@ async function saveAnn() {
   const i = state.days.findIndex(x => x.id === a.id);
   if (i >= 0) state.days[i] = a; else state.days.push(a);
   closeAnnEditor();
-  if (state.dview === 'list') { state.dsel = a.id; if (state.dgroup && a.group !== state.dgroup) state.dgroup = ''; }
+  if (state.dview === 'list') { state.dsel = a.id; if (state.dgroups.length && !state.dgroups.includes(a.group)) state.dgroups = []; }
   render();
   toast(ed.isNew ? '已保存' : '已更新');
 }
 async function deleteAnn() {
   const a = state.dEditing.a;
-  if (!await askConfirm(`删除“${a.title}”？删除后无法恢复。`, '删除')) return;
+  if (!await askConfirm(`删除“${annName(a)}”？删除后无法恢复。`, '删除')) return;
   try { await Store.del('anniversaries', a.id); } catch (err) { toast('没能删除，可能是网络断了，请稍后再试。', 5000); return; }
   state.days = state.days.filter(x => x.id !== a.id);
   if (state.dsel === a.id) { state.dsel = null; state.dopen = false; }
@@ -1146,14 +1358,87 @@ async function deleteAnn() {
   render();
   toast('已删除');
 }
-// 详情页里一键切换“离下一次 / 已经多少天”
-async function toggleCountMode() {
-  const a = state.days.find(x => x.id === state.dsel);
-  if (!a) return;
-  const next = { ...a, countMode: a.countMode === 'since' ? 'next' : 'since', updatedAt: new Date().toISOString() };
-  try { await Store.put('anniversaries', next); } catch (err) { toast('没能保存，可能是网络断了。', 5000); return; }
+
+/* ----- 关联手记：选哪几篇手记和这个日子放在一起 ----- */
+function openLinkDialog(a) {
+  closeMPanel();
+  state.dEditing = { kind: 'links', a, sel: new Set((a.entries || []).filter(id => state.entries.some(e => e.id === id))), day: a.date, changed: false };
+  renderLinkDialog();
+  $('#editor').hidden = false;
+}
+function renderLinkDialog() {
+  const ed = state.dEditing;
+  const byDate = (x, y) => x.date.localeCompare(y.date);
+  const dayList = state.entries.filter(e => e.date.slice(0, 10) === ed.day).sort(byDate);
+  const others = [...ed.sel].map(id => state.entries.find(e => e.id === id)).filter(e => e && e.date.slice(0, 10) !== ed.day).sort(byDate);
+  const row = e => `<label class="lk-row"><input type="checkbox" data-lkentry="${e.id}" ${ed.sel.has(e.id) ? 'checked' : ''}>
+    <span class="ann-main"><span class="ann-sub">${entryTime(e)}</span><span class="lk-title">${esc(entryLabel(e))}</span></span></label>`;
+  $('#editor').innerHTML = `<div class="dialog ann-form" role="dialog" aria-modal="true" aria-labelledby="lk-h">
+    <p id="lk-h" class="lk-h">勾选要和“${esc(annName(ed.a))}”关联的手记</p>
+    <label class="dialog-label" for="lk-day">看哪一天的手记</label>
+    <input type="date" id="lk-day" class="dialog-input" value="${ed.day}">
+    <div class="lk-list">${dayList.length ? dayList.map(row).join('') : '<p class="muted">这一天没有手记。</p>'}</div>
+    ${others.length ? `<p class="dialog-label lk-other">已关联的其他日子</p><div class="lk-list">${others.map(row).join('')}</div>` : ''}
+    <div class="row"><span class="grow"></span><button type="button" class="btn ghost" id="af-cancel">取消</button><button type="button" class="btn" id="lk-save" title="⌘↵">保存</button></div>
+  </div>`;
+}
+async function saveLinks() {
+  const ed = state.dEditing;
+  const a = state.days.find(x => x.id === ed.a.id);
+  if (!a) return closeAnnEditor();
+  const next = { ...a, entries: [...ed.sel], updatedAt: new Date().toISOString() };
+  $('#lk-save').disabled = true;
+  try { await Store.put('anniversaries', next); } catch (err) { $('#lk-save').disabled = false; toast('没能保存，可能是网络断了。', 5000); return; }
   state.days[state.days.indexOf(a)] = next;
+  closeAnnEditor();
   render();
+}
+
+/* ----- 提醒：到了提醒的日子，打开网站先看到 ----- */
+// 这一次提醒的是哪一天（每年重复的看下一次）；不用提醒就返回 null
+function remindTarget(a, today) {
+  if (a.remind == null) return null;
+  const target = a.repeat === 'yearly' ? nextYearly(a.date, today).date : a.date;
+  if (target < today || dayDiff(today, target) > a.remind || a.remindSeen === target) return null;
+  return target;
+}
+function showReminders() {
+  const today = todayKey();
+  const due = allDays().map(a => ({ a, target: remindTarget(a, today) })).filter(x => x.target).sort((x, y) => x.target.localeCompare(y.target));
+  if (!due.length || !$('#confirm').hidden) return;
+  const box = $('#confirm');
+  box.innerHTML = `<div class="dialog remind-box" role="alertdialog" aria-modal="true" aria-labelledby="rm-h">
+    <p class="d-label" id="rm-h">提醒</p>
+    ${due.map(({ a, target }) => {
+      const n = dayDiff(today, target);
+      const nth = a.repeat === 'yearly' ? ' · ' + nthLabel(a, nextYearly(a.date, today).n) : '';
+      return `<button type="button" class="td-item" data-rmgo="${a.id}"><span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>
+        <span class="ann-main"><span class="td-title">${esc(annName(a))}</span><span class="ann-sub">${fmtFull(target)}${nth}</span></span>
+        <span class="td-n">${n ? `还有 <b>${n}</b> 天` : '就是今天'}</span></button>`;
+    }).join('')}
+    <div class="row"><button type="button" class="btn" id="rm-ok">知道了</button></div></div>`;
+  box.hidden = false;
+  $('#rm-ok').focus();
+  const close = () => { box.hidden = true; box.innerHTML = ''; document.removeEventListener('keydown', onKey, true); };
+  const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };   // Esc：先关掉，下次打开还会提醒
+  document.addEventListener('keydown', onKey, true);
+  $('#rm-ok').onclick = () => { close(); markRemindersSeen(due); };
+  box.querySelectorAll('[data-rmgo]').forEach(b => { b.onclick = () => { close(); markRemindersSeen(due); goAnn(b.dataset.rmgo); }; });
+}
+// 记下“这一次已经看过了”（存在数据库里，换手机也不会再弹）
+async function markRemindersSeen(due) {
+  const anns = [];
+  let life = null;
+  for (const { a, target } of due) {
+    if (a.birthday) life = { ...state.life, remindSeen: target };
+    else { const x = state.days.find(d => d.id === a.id); if (x) anns.push({ ...x, remindSeen: target }); }
+  }
+  try {
+    if (anns.length) await Store.putMany('anniversaries', anns);
+    if (life) await Store.put('meta', life);
+  } catch (err) { toast('没能记下“已看过”，下次打开还会提醒', 4000); return; }
+  anns.forEach(n => { state.days[state.days.findIndex(d => d.id === n.id)] = n; });
+  if (life) state.life = life;
 }
 function openLifeSettings() {
   closeMPanel();
@@ -1164,6 +1449,8 @@ function openLifeSettings() {
     <input type="date" id="lf-birth" class="dialog-input" value="${esc(state.life.birth)}">
     <label class="dialog-label" for="lf-span">这条线画到多少岁</label>
     <input type="number" id="lf-span" class="dialog-input" min="30" max="120" inputmode="numeric" value="${state.life.lifespan || 88}">
+    <label class="dialog-label" for="lf-remind">生日提醒</label>
+    ${remindSelect('lf-remind', state.life.remind)}
     <div class="row"><span class="grow"></span><button type="button" class="btn ghost" id="af-cancel">取消</button><button type="button" class="btn" id="lf-save">保存</button></div>
   </div>`;
   $('#editor').hidden = false;
@@ -1173,7 +1460,8 @@ async function saveLife() {
   const birth = $('#lf-birth').value, span = Math.round(Number($('#lf-span').value) || 88);
   if (birth && birth > todayKey()) { toast('出生日期不能晚于今天'); return; }
   if (span < 30 || span > 120) { toast('请填 30 到 120 之间的数字'); return; }
-  const life = { key: 'life', birth, lifespan: span };
+  const r = $('#lf-remind').value;
+  const life = { ...state.life, key: 'life', birth, lifespan: span, remind: r === '' ? null : Number(r) };
   try { await Store.put('meta', life); } catch (err) { toast('没能保存，可能是网络断了。', 5000); return; }
   state.life = life;
   state.lifeAge = null;
@@ -1213,11 +1501,46 @@ function audiosHTML(audios, removable) {
       <span class="name" title="${esc(a.name)}">${esc(a.name || '录音')}${a.size ? ' · ' + fmtSize(a.size) : ''}</span>
       ${removable ? `<button type="button" data-rmaudio="${a.id}" aria-label="移除录音 ${esc(a.name)}">移除</button>` : ''}</div>`).join('');
 }
+// 链接卡片：标题、作者 · 网站名、一两行简介（不存图片）
 function linksHTML(links, removable) {
-  return links.map((l, i) => `<div class="link-card">
-      <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title || l.url)}</a>
-      <span class="dom">${esc(domainOf(l.url))}</span>
-      ${removable ? `<button type="button" data-rmlink="${i}" aria-label="移除链接">×</button>` : ''}</div>`).join('');
+  return links.map((l, i) => {
+    const by = [l.author, l.site || domainOf(l.url)].filter(Boolean);
+    return `<div class="link-card">
+      <span class="lc-mark" aria-hidden="true">${esc((l.site || domainOf(l.url) || '↗').slice(0, 1).toUpperCase())}</span>
+      <span class="lc-main">
+        <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" class="lc-title">${esc(l.title || l.url)}</a>
+        <span class="lc-by">${esc(by.join(' · '))}</span>
+        ${l.desc ? `<span class="lc-desc">${esc(l.desc)}</span>` : ''}
+        ${removable && !l.fetched ? `<button type="button" class="lc-fetch" data-fetchlink="${i}">读取标题和作者</button>` : ''}
+      </span>
+      ${removable ? `<button type="button" class="lc-rm" data-rmlink="${i}" aria-label="移除链接">×</button>` : ''}</div>`;
+  }).join('');
+}
+/* 读取链接的标题、作者、网站名：浏览器不能直接读别的网站，借用免费的 microlink（每天 50 次，只发送链接网址）。
+   读不到也没关系，卡片照样显示网址。 */
+async function fetchLinkInfo(url) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 9000);
+  try {
+    const res = await fetch('https://api.microlink.io/?url=' + encodeURIComponent(url), { signal: ctl.signal });
+    const j = await res.json();
+    if (j.status !== 'success' || !j.data) return null;
+    const d = j.data, clip = (v, n) => (v || '').replace(/\s+/g, ' ').trim().slice(0, n);
+    return { title: clip(d.title, 200), author: clip(d.author, 60), site: clip(d.publisher, 40), desc: clip(d.description, 160) };
+  } catch (err) { return null; } finally { clearTimeout(timer); }
+}
+async function fillLinkInfo(link) {
+  const ed = state.editing;
+  setAddBusy('正在读取链接信息……');
+  const info = await fetchLinkInfo(link.url);
+  if (state.editing !== ed) return;
+  setAddBusy('');
+  link.fetched = true;
+  if (info) {
+    if (!link.title) link.title = info.title;
+    ['author', 'site', 'desc'].forEach(k => { if (info[k] && !link[k]) link[k] = info[k]; });
+  } else toast('没能读到这个链接的信息，卡片会显示网址');
+  renderEdLinks();
 }
 // 阅读页直接显示在右栏（主区）。“← 返回”回到列表，并回到原来看到的位置
 const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
@@ -1233,6 +1556,10 @@ function openReader(id) {
   $('#rd-back').focus({ preventScroll: true });
 }
 function closeReader() {
+  if (state.readFrom === 'days') {        // 从时间轴详情打开的手记：回到时间轴
+    state.readFrom = null; state.reading = null; state.section = 'days';
+    render(); return;
+  }
   const id = state.reading;
   state.reading = null;
   renderMain();
@@ -1247,13 +1574,15 @@ function renderReader() {
   const nb = state.notebooks.length > 1 ? nbById(e.notebookId) : null;
   setTitle(`${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`, `${WEEK[d.getDay()]} · ${pad(d.getHours())}:${pad(d.getMinutes())}${nb ? ' · #' + nb.name : ''}`);
   $('#banner-slot').innerHTML = '';
+  const anns = state.days.filter(a => (a.entries || []).includes(e.id)).sort((x, y) => x.date.localeCompare(y.date));
   const tl = $('#timeline');
   tl.innerHTML = `<article class="reader" aria-label="${ariaLabel(e)}">
     ${e.title ? `<h1 class="rd-title">${esc(e.title)}</h1>` : ''}
-    ${e.body.trim() ? `<div class="rd-body">${richText(e.body.trim())}</div>` : ''}
+    ${e.body.trim() ? `<div class="rd-body">${richText(e.body.trim(), true)}</div>` : ''}
     ${e.photos.length ? `<div class="rd-photos n${Math.min(e.photos.length, 3)}">${e.photos.map(p => `<img data-photo="${p}" data-zoom="1" alt="日记照片">`).join('')}</div>` : ''}
     ${e.audios.length ? `<div class="audio-list">${audiosHTML(e.audios, false)}</div>` : ''}
     ${e.links.length ? `<div class="link-list">${linksHTML(e.links, false)}</div>` : ''}
+    ${anns.length ? `<div class="rd-anns"><p class="d-label">关联的时间轴</p>${anns.map(a => `<button type="button" class="rd-ann" data-goann="${a.id}">${a.emoji ? `<span class="ann-emoji" aria-hidden="true">${esc(a.emoji)}</span>` : ''}<span class="ann-main"><span class="td-title">${esc(annName(a))}</span><span class="ann-sub">${fmtFull(a.date)}</span></span></button>`).join('')}</div>` : ''}
     <div class="sheet-foot"><span>${countWords(e.title + ' ' + e.body)} 字</span><span>${e.updatedAt ? '上次修改 ' + fmtEdited(e.updatedAt) : ''}</span></div>
   </article>`;
   hydrate(tl);
@@ -1294,11 +1623,18 @@ function renderEditor() {
         ${isNew ? '' : '<button type="button" class="text-btn danger" id="ed-del">删除</button>'}
         <button type="button" class="btn" id="ed-done" title="Esc 或 ⌘↵">完成</button>
       </div>
+      <div class="fmt-bar" role="toolbar" aria-label="正文格式（选中文字后点）">
+      <button type="button" data-fmt="**" title="粗体（⌘B）" aria-label="粗体"><b>B</b></button>
+      <button type="button" data-fmt="*" title="斜体（⌘I）" aria-label="斜体"><i>I</i></button>
+      <button type="button" data-fmt="++" title="下划线（⌘U）" aria-label="下划线"><u>U</u></button>
+      <button type="button" data-fmt="~~" title="删除线" aria-label="删除线"><s>S</s></button>
+      <button type="button" data-fmt=">" title="引用：整行变成灰色" aria-label="引用">“ 引用</button>
+    </div>
     </div>
     <label class="sr-only" for="ed-title">标题</label>
-    <input id="ed-title" class="ed-title" placeholder="标题（可以不写）" value="${esc(e.title)}" autocomplete="off">
+    <input id="ed-title" class="ed-title" placeholder="标题" value="${esc(e.title)}" autocomplete="off">
     <label class="sr-only" for="ed-body">正文</label>
-    <textarea id="ed-body" class="ed-body" placeholder="今天发生了什么……&#10;想分类就在正文里写 #标签">${esc(e.body)}</textarea>
+    <textarea id="ed-body" class="ed-body" placeholder="今天发生了什么……">${esc(e.body)}</textarea>
     <div class="tag-suggest" id="ed-tagsug" role="group" aria-label="已有标签，点一下补全" hidden></div>
 
     <div class="ed-attach">
@@ -1309,7 +1645,7 @@ function renderEditor() {
         <label class="sr-only" for="ed-link-url">链接地址</label>
         <input id="ed-link-url" type="url" placeholder="粘贴链接，比如一首歌、一部电影" autocomplete="off">
         <label class="sr-only" for="ed-link-title">链接标题</label>
-        <input id="ed-link-title" placeholder="标题（可以不写）" autocomplete="off">
+        <input id="ed-link-title" placeholder="标题（不写会自动读取）" autocomplete="off">
         <button type="button" class="btn ghost small" id="ed-link-add">添加链接</button>
         <button type="button" class="text-btn" id="ed-link-cancel">取消</button>
       </div>
@@ -1382,9 +1718,56 @@ function addLinkFromForm() {
   const ed = state.editing;
   const url = normalizeURL($('#ed-link-url').value);
   if (!url) { toast('这个链接看起来不对，请检查一下'); return; }
-  ed.e.links.push({ url, title: $('#ed-link-title').value.trim() });
+  const link = { url, title: $('#ed-link-title').value.trim() };
+  ed.e.links.push(link);
   renderEdLinks();
   showLinkForm(false);
+  fillLinkInfo(link);
+}
+
+/* 正文格式按钮：选中文字点一下加上符号，再点一下去掉；“引用”是给选中的每一行开头加 “> ” */
+function replaceInBody(ta, start, end, text) {
+  ta.focus({ preventScroll: true });
+  ta.setSelectionRange(start, end);
+  // 用 insertText 才能 ⌘Z 撤销；不支持的浏览器直接改
+  if (!document.execCommand || !document.execCommand('insertText', false, text)) ta.setRangeText(text, start, end, 'end');
+}
+function applyFormat(mark) {
+  const ta = $('#ed-body');
+  if (!ta || !state.editing) return;
+  const v = ta.value;
+  // 手机上点按钮时正文可能已经失去焦点，就用最后记下的选区
+  const saved = document.activeElement !== ta && state.editing.sel;
+  let s = saved ? saved[0] : ta.selectionStart, e = saved ? saved[1] : ta.selectionEnd;
+  if (mark === '>') {
+    const ls = v.lastIndexOf('\n', s - 1) + 1;
+    let le = v.indexOf('\n', e > s && v[e - 1] === '\n' ? e - 1 : e); if (le < 0) le = v.length;
+    const lines = v.slice(ls, le).split('\n');
+    const allQuoted = lines.every(l => QUOTE_RE.test(l) || !l.trim());
+    const out = lines.map(l => allQuoted ? l.replace(QUOTE_RE, '') : (QUOTE_RE.test(l) || !l.trim() ? l : '> ' + l)).join('\n');
+    replaceInBody(ta, ls, le, out);
+    ta.setSelectionRange(ls, ls + out.length);
+  } else {
+    const n = mark.length;
+    const sel = v.slice(s, e);
+    if (sel.startsWith(mark) && sel.endsWith(mark) && sel.length >= 2 * n) {          // 选中的连符号一起：去掉
+      const inner = sel.slice(n, -n);
+      replaceInBody(ta, s, e, inner); ta.setSelectionRange(s, s + inner.length);
+    } else if (v.slice(s - n, s) === mark && v.slice(e, e + n) === mark && !(mark === '*' && (v[s - 2] === '*' || v[e + 1] === '*'))) {   // 两边已经有符号：去掉
+      replaceInBody(ta, s - n, e + n, sel); ta.setSelectionRange(s - n, e - n);
+    } else {
+      // 选区两头的空格留在外面，不然符号不生效
+      const lead = sel.length - sel.trimStart().length, trail = sel.length - sel.trimEnd().length;
+      const core = sel.trim();
+      if (!core) { replaceInBody(ta, s, e, mark + mark); ta.setSelectionRange(s + n, s + n); }
+      else {
+        replaceInBody(ta, s + lead, e - trail, mark + core + mark);
+        ta.setSelectionRange(s + lead + n, s + lead + n + core.length);
+      }
+    }
+  }
+  state.editing.e.body = ta.value;
+  autosize(); updateWords();
 }
 
 /* 正文里输入 # 时，提示已有的标签，点一下（或按 Tab）补全 */
@@ -1480,7 +1863,7 @@ async function quietly(fn) { try { await fn(); } catch (err) { console.warn(err)
 async function saveEditor() {
   const ed = state.editing;
   if (!ed) return;
-  if ($('#ed-add-menu') && $('#ed-add-menu').classList.contains('busy')) { toast('文件还在上传，请等一下再点“完成”'); return; }
+  if ($('#ed-add-menu') && $('#ed-add-menu').classList.contains('busy')) { toast("还在上传文件或读取链接，请等一下再点“完成”"); return; }
   const e = ed.e;
   e.title = e.title.trim();
   if (ed.isNew && isEmptyEntry(e)) {
@@ -1579,8 +1962,10 @@ function tagDialog(tag) {
     <p id="tg-msg">标签 <span class="htag">#${esc(tag.name)}</span>，用在 ${n} 篇日记里。</p>
     <label class="dialog-label" for="tg-name">改名（正文里的 #${esc(tag.name)} 会一起改）</label>
     <input id="tg-name" class="dialog-input" value="${esc(tag.name)}" autocomplete="off">
+    ${tagGroups().length ? `<label class="dialog-label" for="tg-group">分组</label>
+    <select id="tg-group" class="dialog-input"><option value="">不分组</option>${tagGroups().map(g => `<option value="${g.id}" ${groupOfTag(tag) === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>` : ''}
     <div class="row"><button type="button" class="text-btn danger" id="tg-del">删除这个标签</button><span class="grow"></span>
-      <button type="button" class="btn ghost" id="tg-no">取消</button><button type="button" class="btn" id="tg-save">改名</button></div></div>`;
+      <button type="button" class="btn ghost" id="tg-no">取消</button><button type="button" class="btn" id="tg-save">保存</button></div></div>`;
   box.hidden = false;
   $('#tg-name').focus(); $('#tg-name').select();
   const close = () => { box.hidden = true; box.innerHTML = ''; document.removeEventListener('keydown', onKey, true); };
@@ -1591,7 +1976,15 @@ function tagDialog(tag) {
   document.addEventListener('keydown', onKey, true);
   $('#tg-no').onclick = close;
   box.onclick = ev => { if (ev.target === box) close(); };
-  $('#tg-save').onclick = async () => { const name = $('#tg-name').value; close(); await renameTag(tag, name); };
+  $('#tg-save').onclick = async () => {
+    const name = $('#tg-name').value, gid = $('#tg-group') ? $('#tg-group').value : groupOfTag(tag);
+    close();
+    if (gid !== groupOfTag(tag)) {
+      try { await Store.put('tags', { ...tag, groupId: gid }); tag.groupId = gid; } catch (err) { toast('没能换分组，可能是网络断了'); }
+    }
+    await renameTag(tag, name);
+    render();
+  };
   $('#tg-del').onclick = async () => { close(); await deleteTag(tag); };
 }
 async function renameTag(tag, input) {
@@ -1625,6 +2018,55 @@ async function deleteTag(tag) {
   state.tags = state.tags.filter(x => x.id !== tag.id);
   state.tagSel = state.tagSel.filter(x => x !== tag.id);
   render();
+}
+
+/* ---------- 标签分组：新建 / 改名 / 删除（删除分组不删标签，标签回到“不分组”） ---------- */
+function askText(message, value = '', okLabel = '确定', extra = '') {
+  return new Promise(resolve => {
+    const box = $('#confirm');
+    box.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="tx-msg">
+      <label class="dialog-label" id="tx-msg" for="tx-in">${esc(message)}</label>
+      <input id="tx-in" class="dialog-input" value="${esc(value)}" autocomplete="off">
+      <div class="row">${extra}<span class="grow"></span><button type="button" class="btn ghost" id="tx-no">取消</button><button type="button" class="btn" id="tx-yes">${esc(okLabel)}</button></div></div>`;
+    box.hidden = false;
+    $('#tx-in').focus(); $('#tx-in').select();
+    const done = v => { box.hidden = true; box.innerHTML = ''; document.removeEventListener('keydown', onKey, true); resolve(v); };
+    const onKey = ev => {
+      if (ev.key === 'Escape') { ev.stopPropagation(); done(null); }
+      if (ev.key === 'Enter' && ev.target.id === 'tx-in' && !ev.isComposing) { ev.preventDefault(); ev.stopPropagation(); done($('#tx-in').value.trim()); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    $('#tx-no').onclick = () => done(null);
+    $('#tx-yes').onclick = () => done($('#tx-in').value.trim());
+    const del = $('#tx-del'); if (del) del.onclick = () => done({ del: true });
+    box.onclick = ev => { if (ev.target === box) done(null); };
+  });
+}
+async function addTagGroup() {
+  const name = await askText('新分组的名字', '', '新建分组');
+  if (!name) return;
+  if (tagGroups().some(g => g.name === name)) { toast('已经有同名的分组了'); return; }
+  try { await savePrefs({ tagGroups: [...tagGroups(), { id: uid(), name }] }); } catch (err) { toast('没能新建分组，可能是网络断了'); return; }
+  renderSide();
+}
+async function editTagGroup(id) {
+  const g = tagGroups().find(x => x.id === id);
+  if (!g) return;
+  const r = await askText('分组名字', g.name, '改名', '<button type="button" class="text-btn danger" id="tx-del">删除这个分组</button>');
+  if (!r) return;
+  try {
+    if (r.del) {
+      if (!await askConfirm(`删除分组“${g.name}”？里面的标签不会删除，会回到“不分组”。`, '删除分组')) return;
+      const moved = state.tags.filter(t => t.groupId === id).map(t => ({ ...t, groupId: '' }));
+      await Store.putMany('tags', moved);
+      moved.forEach(t => { tagById(t.id).groupId = ''; });
+      await savePrefs({ tagGroups: tagGroups().filter(x => x.id !== id) });
+    } else if (r !== g.name) {
+      if (tagGroups().some(x => x.name === r)) { toast('已经有同名的分组了'); return; }
+      await savePrefs({ tagGroups: tagGroups().map(x => x.id === id ? { ...x, name: r } : x) });
+    }
+  } catch (err) { toast('没能保存，可能是网络断了'); }
+  renderSide();
 }
 
 /* ---------- 通用：确认框 / 提示 / 大图 ---------- */
@@ -1675,7 +2117,7 @@ async function exportData() {
   const data = {
     app: 'paper-journal', version: 4, exportedAt: new Date().toISOString(),
     notebooks: state.notebooks, entries: state.entries, tags: state.tags, photos, media,
-    anniversaries: state.days, meta: state.life.birth ? [state.life] : [],
+    anniversaries: state.days, meta: [...(state.life.birth ? [state.life] : []), state.prefs],
   };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1750,9 +2192,11 @@ async function loadAll() {
   state.tagSel = state.tagSel.filter(id => tagById(id));
   if (state.notebook && !nbById(state.notebook)) state.notebook = null;
   // 纪念日：旧数据缺的字段补上默认值
-  state.days = (await Store.all('anniversaries')).map(raw => ({ emoji: '', group: '', repeat: 'none', countMode: 'next', life: false, note: '', ...raw }));
-  const life = (await Store.all('meta')).find(m => m.key === 'life');
+  state.days = (await Store.all('anniversaries')).map(normalizeAnn);
+  const meta = await Store.all('meta');
+  const life = meta.find(m => m.key === 'life');
   state.life = { key: 'life', birth: '', lifespan: 88, ...(life || {}) };
+  state.prefs = { key: 'prefs', ...(meta.find(m => m.key === 'prefs') || {}) };
 }
 
 /* v0.5 起，标签以正文里的 #标签 为准。每次打开时检查一遍，只有需要时才写入：
@@ -1820,7 +2264,7 @@ window.matchMedia('(min-width: 761px)').addEventListener('change', () => {
 });
 
 /* ---------- 事件 ---------- */
-function goJournal() { state.page = 'journal'; state.section = 'journal'; state.reading = null; }
+function goJournal() { state.page = 'journal'; state.section = 'journal'; state.reading = null; state.readFrom = null; }
 function shiftAnchor(days) { state.anchor = addDays(state.anchor, days); state.calMonth = state.anchor.slice(0, 7); render(); }
 const scrollTop = () => { $('#main').scrollTop = 0; window.scrollTo(0, 0); };
 
@@ -1836,13 +2280,18 @@ document.addEventListener('click', async ev => {
     if (t.matches('[data-pick]')) { $('#af-emoji').value = t.dataset.pick; return; }
     if (t.id === 'af-save') return saveAnn();
     if (t.id === 'lf-save') return saveLife();
+    if (t.id === 'lk-save') return saveLinks();
     if (t.id === 'af-cancel') return cancelAnnEditor();
     if (t.id === 'af-del') return deleteAnn();
     return;
   }
   // 纪念日：页面
   if (t.matches('[data-dview]')) { state.section = 'days'; state.dview = t.dataset.dview; state.dopen = false; state.lifeAge = null; closeMPanel(); render(); scrollTop(); return; }
-  if (t.matches('[data-dgroup]')) { state.dgroup = t.dataset.dgroup; state.dsel = null; renderMain(); return; }
+  if (t.matches('[data-dgroup]')) {   // 分类可以多选，再点一次取消
+    const g = t.dataset.dgroup;
+    state.dgroups = !g ? [] : state.dgroups.includes(g) ? state.dgroups.filter(x => x !== g) : [...state.dgroups, g];
+    state.dsel = null; renderMain(); return;
+  }
   if (t.matches('[data-ann]')) {
     state.dsel = t.dataset.ann; state.dAllMarks = false;
     if (isPhone()) { state.dopen = true; renderMain(); scrollTop(); } else render();   // render：侧栏日历也要圈出这一天
@@ -1855,7 +2304,12 @@ document.addEventListener('click', async ev => {
   if (t.id === 'toggle-marks') { state.dAllMarks = !state.dAllMarks; renderMain(); return; }
   if (t.id === 'life-settings') return openLifeSettings();
   if (t.matches('[data-lifeage]')) { state.lifeAge = +t.dataset.lifeage; renderMain(); return; }
-  if (t.id === 'ann-count') return toggleCountMode();
+  if (t.id === 'ann-link') { const a = state.days.find(x => x.id === state.dsel); if (a) openLinkDialog(a); return; }
+  if (t.matches('[data-openentry]')) {   // 从时间轴打开关联的手记；“← 返回”回到时间轴
+    const id = t.dataset.openentry;
+    state.section = 'journal'; state.page = 'journal'; state.reading = null; state.readFrom = 'days';
+    renderSide(); openReader(id); return;
+  }
   if (t.matches('[data-dcal]')) {
     const [y, m] = state.dcalMonth.split('-').map(Number);
     const d = new Date(y, m - 1 + Number(t.dataset.dcal), 1);
@@ -1877,7 +2331,7 @@ document.addEventListener('click', async ev => {
   if (t.id === 'rd-edit') { const e = state.entries.find(x => x.id === state.reading); if (e) openEditor(e, false, true); return; }
 
   // 板块 / 页面 / 手机面板
-  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; state.reading = null; state.dopen = false; closeMPanel(); render(); scrollTop(); return; }
+  if (t.matches('[data-section]')) { state.section = t.dataset.section; state.page = 'journal'; state.reading = null; state.readFrom = null; state.dopen = false; closeMPanel(); render(); scrollTop(); return; }
   if (t.matches('[data-mpanel]')) return openMPanel(t.dataset.mpanel);
   if (t.matches('[data-page]')) { state.page = t.dataset.page; state.reading = null; closeMPanel(); render(); scrollTop(); return; }
   if (t.id === 'stats-summary') { state.page = 'stats'; state.reading = null; render(); scrollTop(); return; }
@@ -1925,6 +2379,14 @@ document.addEventListener('click', async ev => {
   if (t.matches('[data-delnb]')) return deleteNotebook(t.dataset.delnb);
   if (t.id === 'toggle-tag-edit') { state.editTags = !state.editTags; renderSide(); return; }
   if (t.matches('[data-tagedit]')) return tagDialog(tagById(t.dataset.tagedit));
+  if (t.matches('[data-tgedit]')) return editTagGroup(t.dataset.tgedit);
+  if (t.id === 'add-tgroup') return addTagGroup();
+  if (t.matches('[data-nbdef]')) {
+    try { await savePrefs({ defaultNotebook: t.dataset.nbdef }); } catch (err) { toast('没能保存，可能是网络断了'); return; }
+    renderSide();
+    toast(t.dataset.nbdef ? `打开网站时会先显示“${nbById(t.dataset.nbdef).name}”` : '打开网站时显示“所有”');
+    return;
+  }
   // 备份 / 账户
   if (t.id === 'export-btn') { closeMPanel(); return exportData(); }
   if (t.id === 'import-btn') return $('#import-file').click();
@@ -1963,6 +2425,7 @@ document.addEventListener('click', async ev => {
   if (t.id === 'add-link') return showLinkForm(true);
   if (t.id === 'ed-link-cancel') return showLinkForm(false);
   if (t.matches('[data-hashtag]')) return insertHashtag(ed.sug[+t.dataset.hashtag]);
+  if (t.matches('[data-fmt]')) return applyFormat(t.dataset.fmt);
   if (t.id === 'ed-del') {
     if (!await askConfirm('删除这篇日记？删除后无法恢复。', '删除')) return;
     try { await deleteEntry(ed.e.id); } catch (err) { toast('没能删除，可能是网络断了，请稍后再试。', 5000); return; }
@@ -1990,12 +2453,13 @@ document.addEventListener('click', async ev => {
     return;
   }
   if (t.matches('[data-rmlink]')) { ed.e.links.splice(+t.dataset.rmlink, 1); renderEdLinks(); return; }
+  if (t.matches('[data-fetchlink]')) { const l = ed.e.links[+t.dataset.fetchlink]; if (l) fillLinkInfo(l); return; }
   if (t.id === 'ed-link-add') return addLinkFromForm();
 });
 
 // 点纸外面的空白处：编辑时 = 完成，阅读时 = 关闭
 $('#editor').addEventListener('mousedown', ev => {
-  if (ev.target.closest('#ed-tagsug')) { ev.preventDefault(); return; }   // 点标签提示时不让正文失去焦点
+  if (ev.target.closest('#ed-tagsug, .fmt-bar')) { ev.preventDefault(); return; }   // 点标签提示、格式按钮时不让正文失去焦点
   if (ev.target.id !== 'editor') return;
   if (state.editing) saveEditor();
   else if (state.dEditing) cancelAnnEditor();
@@ -2005,6 +2469,7 @@ $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; }
 document.addEventListener('input', ev => {
   const t = ev.target;
   if (t.id === 'search') { state.query = t.value; goJournal(); renderMain(); renderCalendar(); return; }
+  if (t.id === 'af-title') { fitAnnTitle(); return; }
   if (t.id === 'anchor') { if (t.value) { state.anchor = t.value; state.calMonth = t.value.slice(0, 7); render(); } return; }
   if (!state.editing) return;
   const e = state.editing.e;
@@ -2015,7 +2480,14 @@ document.addEventListener('input', ev => {
 });
 document.addEventListener('change', async ev => {
   const t = ev.target;
-  if (t.id === 'af-repeat') { $('#af-countrow').hidden = !t.checked; return; }
+  if (state.dEditing && state.dEditing.kind === 'links') {
+    const ed = state.dEditing;
+    if (t.matches('[data-lkentry]')) { if (t.checked) ed.sel.add(t.dataset.lkentry); else ed.sel.delete(t.dataset.lkentry); ed.changed = true; return; }
+    if (t.id === 'lk-day' && t.value) { ed.day = t.value; renderLinkDialog(); $('#lk-day').focus(); return; }
+  }
+  if (t.id === 'af-countdown' || t.id === 'af-memorial') { state.dEditing.flagsTouched = true; return; }
+  // 新记的日子：选了以后的日期，自动勾上“倒数日”（自己改过勾选就不动）
+  if (t.id === 'af-date' && state.dEditing && !state.dEditing.flagsTouched && t.value) { $('#af-countdown').checked = t.value > todayKey(); return; }
   if (t.id === 'ed-file' && t.files.length) { const files = [...t.files]; t.value = ''; await addPhotos(files); }
   if (t.id === 'ed-audio-file' && t.files.length) { const files = [...t.files]; t.value = ''; await addAudios(files); }
   if (t.id === 'import-file' && t.files[0]) { closeMPanel(); await importData(t.files[0]); t.value = ''; }
@@ -2030,6 +2502,10 @@ document.addEventListener('change', async ev => {
   }
 });
 // 正文里移动光标时，更新 #标签 提示；离开正文就收起
+document.addEventListener('selectionchange', () => {
+  const ta = document.activeElement;
+  if (state.editing && ta && ta.id === 'ed-body') state.editing.sel = [ta.selectionStart, ta.selectionEnd];
+});
 document.addEventListener('keyup', ev => { if (ev.target.id === 'ed-body' && /^Arrow|Home|End/.test(ev.key)) renderTagSuggest(); });
 document.addEventListener('pointerup', ev => { if (ev.target.id === 'ed-body') setTimeout(renderTagSuggest, 0); });
 document.addEventListener('focusout', ev => {
@@ -2051,12 +2527,13 @@ document.addEventListener('keydown', ev => {
 
   if (state.dEditing) {
     if (ev.key === 'Escape') { ev.preventDefault(); cancelAnnEditor(); }
-    else if (mod && ev.key === 'Enter') { ev.preventDefault(); if (state.dEditing.kind === 'life') saveLife(); else saveAnn(); }
+    else if (mod && ev.key === 'Enter') { ev.preventDefault(); const k = state.dEditing.kind; if (k === 'life') saveLife(); else if (k === 'links') saveLinks(); else saveAnn(); }
     return;
   }
   if (state.editing) {
     if (ev.key === 'Escape' && !$('#ed-link-form').hidden) { ev.preventDefault(); showLinkForm(false); return; }
     if (ev.key === 'Escape' || (mod && ev.key === 'Enter')) { ev.preventDefault(); saveEditor(); return; }
+    if (ev.target.id === 'ed-body' && mod && !ev.shiftKey && !ev.altKey && /^[biu]$/i.test(ev.key)) { ev.preventDefault(); applyFormat({ b: '**', i: '*', u: '++' }[ev.key.toLowerCase()]); return; }
     if (ev.target.id === 'ed-body' && ev.key === 'Tab' && !ev.isComposing && state.editing.hash && state.editing.sug.length) { ev.preventDefault(); insertHashtag(state.editing.sug[0]); return; }
     if ((ev.target.id === 'ed-link-url' || ev.target.id === 'ed-link-title') && ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); addLinkFromForm(); return; }
     if ((ev.target.id === 'add-photo' || ev.target.id === 'add-audio') && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); ev.target.click(); }
@@ -2104,7 +2581,9 @@ async function boot(session) {
     return;
   }
   $('#loading').hidden = true;
+  if (nbById(state.prefs.defaultNotebook)) state.notebook = state.prefs.defaultNotebook;   // 打开网站时先显示默认的日记本
   render();
+  showReminders();
 }
 $('#login-form').addEventListener('submit', async ev => {
   ev.preventDefault();
