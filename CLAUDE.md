@@ -12,7 +12,7 @@
 
 ## 项目是什么
 
-- 两个板块：**手记**（日记）和 **时间轴**（纪念日 / 倒数日，v0.6 起，代码里叫 `section: 'days'`，页面 `dview`：today 今日 / list 时间轴 / life 人生 / cal 日历）。日历在电脑上是侧栏里的小日历（`renderDaysSideCal`），只有手机才是单独一页（`renderDCal`）。时间轴页不显示 emoji。两个板块的数据放在一起，界面分开设计。
+- 两个板块：**手记**（日记）和 **时间轴**（纪念日 / 倒数日，v0.6 起，代码里叫 `section: 'days'`，页面 `dview`：today 今日 / list 时间轴 / life 人生 / cal 日历）。日历在电脑上是侧栏里的小日历（`renderDaysSideCal`），只有手机才是单独一页（`renderDCal`）。时间轴列表不显示 emoji，详情页显示（v0.8）。时间轴列表只放已经过去的日子，按日期分组。两个板块的数据放在一起，界面分开设计。
 - 纯静态网页，部署在 GitHub Pages：<https://lilili444.github.io/A-Tape/>（main 分支根目录，推送后 1～3 分钟生效）。
 - 后端是 Supabase 免费版（项目网址写在 `config.js` 里）。
 
@@ -41,16 +41,22 @@
     notebookId, createdAt, updatedAt, source?, sourceFile?, bookmarked? }
   ```
   `bookmarked` 是 v0.5 去掉的收藏功能留下的旧字段，不读也不删。
+  链接：`{ url, title, author?, site?, desc?, fetched? }`（v0.8 起自动读取，借 microlink；不存图片）。
+- **正文格式**（v0.8）：正文仍是纯文字，用符号标记：`**粗**` `*斜*` `++下划线++` `~~删除~~`，行首 `> ` 是引用（灰色）。显示用 `richText(text, block)`，不要改成存 HTML。
 - **标签以正文为准**（v0.5 起）：正文里的 `#标签` 在保存时由 `tagsInText()` 识别，再由 `ensureTags()` 换成 `tags: [tagId]`。不要再做单独的标签输入。`loadAll()` 里的 `syncTags()` 负责旧数据迁移和保持一致。改名、删除标签要同时改正文（`oneTagRE`）。
   `source: 'apple-journal'` 的 319 篇是从苹果手记导入的（2026-11-22），只有日期没有时间，所以同一天从 12:00 起每篇加一分钟。
-- 日记本：`{ id, name, order, createdAt }`；标签：`{ id, name, createdAt }`。
+- 日记本：`{ id, name, order, createdAt }`；标签：`{ id, name, groupId?, order?, createdAt }`。
+- 设置 `meta` 里 `{ key: 'prefs', defaultNotebook, tagGroups: [{ id, name }], dayGroupOrder: [分类名] }`（`state.prefs`，用 `savePrefs()` 改）。
 - 时间轴上的日子（anniversary）：
   ```js
-  { id, title, date: 'YYYY-MM-DD', emoji, group /* 分类 */, repeat: 'none' | 'yearly',
-    countMode: 'next' | 'since' /* 每年重复的：显示离下一次还是已经多少天 */,
-    life /* 人生足迹 */, note, createdAt, updatedAt, size? /* v0.7 试过又取消的大小，不读也不删 */ }
+  { id, title /* 可以多行，单行处用 annName() 取第一行 */, date: 'YYYY-MM-DD', emoji, group /* 分类 */, repeat: 'none' | 'yearly',
+    countdown /* 倒数日 */, memorial /* 纪念日 */, life /* 人生足迹 */,
+    remind /* 提前几天提醒，null 不提醒 */, remindSeen /* 已看过哪一次（日期） */, entries /* 关联的手记 id */,
+    note, createdAt, updatedAt,
+    countMode? /* v0.8 前的旧字段，不读也不删；没有 countdown/memorial 时由 normalizeAnn() 推出来 */,
+    size? /* v0.7 试过又取消的大小，不读也不删 */ }
   ```
-  出生日期存在 meta：`{ key: 'life', birth, lifespan }`，生日由它自动生成（`birthdayItem()`，不存数据库）。天数当天算 0。
+  出生日期存在 meta：`{ key: 'life', birth, lifespan, remind?, remindSeen? }`，生日由它自动生成（`birthdayItem()`，不存数据库）。天数当天算 0。
 - 备份文件格式（导出 / 导入）：`{ app: 'paper-journal', version: 4, notebooks, tags, entries, photos: [{id, data}], media: [{id, mime, data}], anniversaries, meta }`（v3 的旧备份没有最后两项，照常能导入）。`app` 的值不要改，否则旧备份导不进去。
 - 照片一律压缩到长边 1600px、JPEG 质量 0.82（Lili 确认过的标准）。
 - **加新字段**：直接在 JSON 里加，在 `loadAll()` 里给旧数据补默认值即可，不用改表。
@@ -64,7 +70,8 @@
 - 电脑侧栏的“视图 / 日记本 / 标签”可以点名字收起（`data-collapse`，存在 localStorage）；手机面板里始终展开。
 - 手机版：顶部 6 个按钮（视图 / 日记本 / 标签 / 搜索 / 统计 / 备份），点开才展开面板；面板里显示的是侧栏的同一块 DOM（`openMPanel` 把它搬过去，关闭时 `restoreSide` 搬回来），所以电脑和手机共用一套功能代码。
 - 点日记先打开阅读页（`openReader`，显示在右栏主区，`state.reading` 记着是哪篇；“← 返回”回到列表原位置），点“编辑”才进编辑页（`openEditor(e, false, true)`，浮在上面的 `#editor` 层），完成后回到阅读页。
-- 侧栏标签的编辑模式不换成输入框：点标签弹出 `tagDialog`（改名 / 删除）。
+- 侧栏标签的编辑模式不换成输入框：点标签弹出 `tagDialog`（改名 / 删除 / 换分组）。
+- 拖动排序用通用的 `data-sort-kind / data-sort-id / data-sort-zone`，松手后在 `onSortDone()` 里保存；手机上长按才开始拖。
 - **版本号和缓存**：版本号是 `v大.功能.修补`（规则见 `docs/开发记录.md`）。GitHub Pages 让浏览器缓存 10 分钟，所以**改了 `style.css`、`app.js` 或 `config.js`，就要升版本号：改 `app.js` 的 `APP_VERSION`，并把 `index.html` 里三处 `?v=` 改成同一个版本号**，否则会出现新页面配旧程序、页面全乱的情况（2026-11-22 发生过）。然后在开发记录里补一条这个版本改了什么。
 
 ## 自动备份（私人仓库 `lilili444/A-Tape-backup`）
@@ -93,6 +100,7 @@
 ## 待办
 
 - [x] 时间轴板块（v0.6 / v0.7）
-- [ ] 时间轴：照片背景（参考第一款 app）、农历、提醒（可以考虑导出到苹果日历）、搜索；导入旧倒数日 app 的数据（截图识别）
+- [x] 时间轴：应用内提醒（v0.8）
+- [ ] 时间轴：照片背景（参考第一款 app）、农历、提醒导出到苹果日历、搜索；导入旧倒数日 app 的数据（截图识别）
 - [x] 每周用 GitHub Actions 自动备份到私人仓库 `A-Tape-backup`（见上面“自动备份”）
 - [x] 项目名：一卷磁带（`<title>`、登录页 `<h1>`、备份文件名“一卷磁带备份-日期.json”）
